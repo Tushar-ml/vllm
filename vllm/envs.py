@@ -248,6 +248,9 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = False
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
+    VLLM_MEGAKERNEL_ON: bool = False
+    VLLM_MEGAKERNEL_ROOT: str = ""
+    VLLM_MEGAKERNEL_MK_LLAMA_PATH: str = ""
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
 
 
@@ -1650,6 +1653,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NIXL EP environment variables
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
         os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
+    ),
+    # Megakernels fused Llama 1B integration.
+    "VLLM_MEGAKERNEL_ON": lambda: os.getenv("VLLM_MEGAKERNEL_ON", "")
+    .strip()
+    .lower()
+    in ("1", "true"),
+    "VLLM_MEGAKERNEL_ROOT": lambda: os.getenv("VLLM_MEGAKERNEL_ROOT", ""),
+    "VLLM_MEGAKERNEL_MK_LLAMA_PATH": lambda: os.getenv(
+        "VLLM_MEGAKERNEL_MK_LLAMA_PATH", ""
     ),
     # Whether enable XPU graph on Intel GPU
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(

@@ -712,6 +712,30 @@ class _ModelInfo:
         )
 
 
+def _finalize_megakernel_model_cls(
+    model_cls: type[nn.Module],
+    arch: str,
+    model_config: ModelConfig,
+) -> type[nn.Module]:
+    from vllm.model_executor.models.megakernel_resolve import (
+        apply_megakernel_llama_model_cls,
+    )
+
+    return apply_megakernel_llama_model_cls(model_cls, arch, model_config)
+
+
+def _finalize_megakernel_inspection(
+    model_info: _ModelInfo,
+    arch: str,
+    model_config: ModelConfig,
+) -> _ModelInfo:
+    from vllm.model_executor.models.megakernel_resolve import (
+        apply_megakernel_llama_inspection,
+    )
+
+    return apply_megakernel_llama_inspection(model_info, arch, model_config)
+
+
 class _BaseRegisteredModel(ABC):
     @abstractmethod
     def inspect_model_cls(self) -> _ModelInfo:
@@ -1090,10 +1114,20 @@ class _ModelRegistry:
             if arch is not None:
                 model_info = self._try_inspect_model_cls(arch)
                 if model_info is not None:
-                    return (model_info, arch)
+                    return (
+                        _finalize_megakernel_inspection(
+                            model_info, arch, model_config
+                        ),
+                        arch,
+                    )
         elif model_config.model_impl == "terratorch":
             model_info = self._try_inspect_model_cls("Terratorch")
-            return (model_info, "Terratorch")
+            return (
+                _finalize_megakernel_inspection(
+                    model_info, "Terratorch", model_config
+                ),
+                "Terratorch",
+            )
 
         # Fallback to transformers impl (after resolving convert_type)
         if (
@@ -1105,13 +1139,23 @@ class _ModelRegistry:
             if arch is not None:
                 model_info = self._try_inspect_model_cls(arch)
                 if model_info is not None:
-                    return (model_info, arch)
+                    return (
+                        _finalize_megakernel_inspection(
+                            model_info, arch, model_config
+                        ),
+                        arch,
+                    )
 
         for arch in architectures:
             normalized_arch = self._normalize_arch(arch, model_config)
             model_info = self._try_inspect_model_cls(normalized_arch)
             if model_info is not None:
-                return (model_info, arch)
+                return (
+                    _finalize_megakernel_inspection(
+                        model_info, arch, model_config
+                    ),
+                    arch,
+                )
 
         # Fallback to transformers impl (before resolving runner_type)
         if (
@@ -1122,7 +1166,12 @@ class _ModelRegistry:
             if arch is not None:
                 model_info = self._try_inspect_model_cls(arch)
                 if model_info is not None:
-                    return (model_info, arch)
+                    return (
+                        _finalize_megakernel_inspection(
+                            model_info, arch, model_config
+                        ),
+                        arch,
+                    )
 
         return self._raise_for_unsupported(architectures)
 
@@ -1142,12 +1191,18 @@ class _ModelRegistry:
             if arch is not None:
                 model_cls = self._try_load_model_cls(arch)
                 if model_cls is not None:
-                    return (model_cls, arch)
+                    return (
+                        _finalize_megakernel_model_cls(model_cls, arch, model_config),
+                        arch,
+                    )
         elif model_config.model_impl == "terratorch":
             arch = "Terratorch"
             model_cls = self._try_load_model_cls(arch)
             if model_cls is not None:
-                return (model_cls, arch)
+                return (
+                    _finalize_megakernel_model_cls(model_cls, arch, model_config),
+                    arch,
+                )
 
         # Fallback to transformers impl (after resolving convert_type)
         if (
@@ -1159,13 +1214,19 @@ class _ModelRegistry:
             if arch is not None:
                 model_cls = self._try_load_model_cls(arch)
                 if model_cls is not None:
-                    return (model_cls, arch)
+                    return (
+                        _finalize_megakernel_model_cls(model_cls, arch, model_config),
+                        arch,
+                    )
 
         for arch in architectures:
             normalized_arch = self._normalize_arch(arch, model_config)
             model_cls = self._try_load_model_cls(normalized_arch)
             if model_cls is not None:
-                return (model_cls, arch)
+                return (
+                    _finalize_megakernel_model_cls(model_cls, arch, model_config),
+                    arch,
+                )
 
         # Fallback to transformers impl (before resolving runner_type)
         if (
@@ -1176,7 +1237,10 @@ class _ModelRegistry:
             if arch is not None:
                 model_cls = self._try_load_model_cls(arch)
                 if model_cls is not None:
-                    return (model_cls, arch)
+                    return (
+                        _finalize_megakernel_model_cls(model_cls, arch, model_config),
+                        arch,
+                    )
 
         return self._raise_for_unsupported(architectures)
 

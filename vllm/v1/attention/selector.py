@@ -6,6 +6,7 @@ from typing import NamedTuple, cast, get_args
 
 import torch
 
+import vllm.envs as envs
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -109,6 +110,28 @@ def _cached_get_attn_backend(
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
     )
+    if (
+        envs.VLLM_MEGAKERNEL_ON
+        and attn_selector_config.attn_type == AttentionType.DECODER
+        and not attn_selector_config.use_mla
+        and not attn_selector_config.use_sparse
+    ):
+        from vllm.config import get_current_vllm_config
+        from vllm.model_executor.models.megakernel_spec import (
+            validate_megakernel_llama_hf_only_or_raise,
+        )
+
+        try:
+            validate_megakernel_llama_hf_only_or_raise(
+                get_current_vllm_config().model_config
+            )
+            attention_cls = (
+                "vllm.v1.attention.backends.megakernel_attn."
+                "MegakernelAttentionBackend"
+            )
+        except Exception:
+            # Keep default backend if model/shape does not match MK constraints.
+            pass
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}"
