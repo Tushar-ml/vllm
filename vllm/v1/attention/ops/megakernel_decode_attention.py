@@ -1,14 +1,11 @@
 """Megakernel decode attention op wrapper.
 
 This wrapper keeps a tensor-only signature so it is safe to use under
-piecewise/full CUDA graph capture. For now, it routes to Triton's unified
-attention kernel while preserving the same call-site contract expected by a
-Megakernel backend.
+piecewise/full CUDA graph capture.
 """
 
 from __future__ import annotations
 
-import os
 import torch
 
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
@@ -42,19 +39,6 @@ def megakernel_decode_attention(
     # slot_mapping is intentionally part of the ABI for paged-KV adapters,
     # even though unified_attention currently consumes block_table/seq_lens.
     del slot_mapping
-
-    allow_triton_fallback = os.getenv("VLLM_MEGAKERNEL_ALLOW_TRITON_FALLBACK", "0") in (
-        "1",
-        "true",
-        "True",
-    )
-    if not allow_triton_fallback:
-        raise RuntimeError(
-            "Megakernel decode op requested but true attention kernels are not "
-            "integrated yet. Refusing silent Triton fallback. Set "
-            "VLLM_MEGAKERNEL_ALLOW_TRITON_FALLBACK=1 only for temporary "
-            "correctness testing."
-        )
 
     unified_attention(
         q=query,

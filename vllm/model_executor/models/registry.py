@@ -718,10 +718,10 @@ def _finalize_megakernel_model_cls(
     model_config: ModelConfig,
 ) -> type[nn.Module]:
     from vllm.model_executor.models.megakernel_resolve import (
-        apply_megakernel_llama_model_cls,
+        apply_megakernel_model_cls,
     )
 
-    return apply_megakernel_llama_model_cls(model_cls, arch, model_config)
+    return apply_megakernel_model_cls(model_cls, arch, model_config)
 
 
 def _finalize_megakernel_inspection(
@@ -730,10 +730,10 @@ def _finalize_megakernel_inspection(
     model_config: ModelConfig,
 ) -> _ModelInfo:
     from vllm.model_executor.models.megakernel_resolve import (
-        apply_megakernel_llama_inspection,
+        apply_megakernel_inspection,
     )
 
-    return apply_megakernel_llama_inspection(model_info, arch, model_config)
+    return apply_megakernel_inspection(model_info, arch, model_config)
 
 
 class _BaseRegisteredModel(ABC):

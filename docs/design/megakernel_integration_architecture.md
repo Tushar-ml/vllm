@@ -1,4 +1,4 @@
-# Megakernel Integration Architecture (Llama 3.2 1B)
+# Megakernel Integration Architecture (Small-Model Modular Path)
 
 ## Scope
 
@@ -6,7 +6,7 @@ This document records the architectural changes made to integrate Megakernels in
 
 The current target is:
 
-- Llama 3.2 1B only (spec-gated).
+- Small-model families via modular plugins (Llama/Qwen/Mistral), with Llama 3.2 1B as the production reference.
 - Megakernel enabled only when `VLLM_MEGAKERNEL_ON=1`.
 - Direct `mk_llama` execution path integrated into vLLM model execution.
 
@@ -14,18 +14,19 @@ The current target is:
 
 ### 1) Model registration and gating
 
-Megakernel activation is hooked into vLLM model resolution and inspection so the Megakernel model wrapper is selected only when the runtime and model config match the supported 1B spec.
+Megakernel activation is hooked into vLLM model resolution and inspection through a plugin registry so model wrappers are selected per family.
 
 Key files:
 
 - `vllm/model_executor/models/registry.py`
 - `vllm/model_executor/models/megakernel_resolve.py`
+- `vllm/model_executor/models/megakernel_plugins.py`
 - `vllm/model_executor/models/megakernel_spec.py`
 
 What changed:
 
-- Added conditional model-class substitution for Llama architecture when Megakernel is on.
-- Added strict spec validation for supported architecture/runtime combinations.
+- Added modular family dispatch (`llama_small`, `qwen_small`, `mistral_small`) driven by plugin metadata.
+- Added strict family-level shape validation for supported architecture/runtime combinations.
 - Kept fail-closed behavior for unsupported combinations.
 
 ### 2) Environment-variable plumbing
@@ -39,9 +40,13 @@ Key file:
 Variables used:
 
 - `VLLM_MEGAKERNEL_ON`
+- `VLLM_MEGAKERNEL_STRICT`
+- `VLLM_MEGAKERNEL_FAMILIES`
 - `VLLM_MEGAKERNEL_ROOT`
 - `VLLM_MEGAKERNEL_MK_LLAMA_PATH`
-- `VLLM_MEGAKERNEL_ALLOW_TRITON_FALLBACK` (for legacy backend fallback testing)
+- `VLLM_MEGAKERNEL_MAX_LEN`
+- `VLLM_MEGAKERNEL_MAX_BATCH_SIZE`
+- `VLLM_MEGAKERNEL_PARITY_TOKENS`
 
 ### 3) Direct `mk_llama` model path in vLLM
 
@@ -98,6 +103,18 @@ Representative eager benchmarking configuration:
 - `--max-model-len 4096`
 - `--max-num-seqs 1`
 - `--enforce-eager`
+
+## Family Support Matrix
+
+- `llama_small`:
+  - Architecture: `LlamaForCausalLM`
+  - Status: production reference path (strict Llama 3.2 1B-compatible shape)
+- `qwen_small`:
+  - Architecture: `Qwen2ForCausalLM`
+  - Status: modular validator + dispatch integrated; performance tuning is ongoing
+- `mistral_small`:
+  - Architecture: `MistralForCausalLM`
+  - Status: modular validator + dispatch integrated; performance tuning is ongoing
 
 ## Eager Latency Benchmark (with and without Megakernel)
 
@@ -177,6 +194,6 @@ Notes:
 
 ## Remaining Work
 
-- Remove `max_num_seqs=1` constraint safely for robust multi-request decode on direct `mk_llama`.
-- Continue moving toward true Megakernel decode/prefill ops in the vLLM attention backend path for broader generalization.
-- Expand benchmark suite to include throughput (QPS), TTFT, and multi-concurrency stress scenarios.
+- Complete family-specific runtime/kernel tuning for Qwen and Mistral small variants.
+- Expand benchmark suite to include throughput (QPS), TTFT, and multi-concurrency stress scenarios across all enabled families.
+- Continue hardening multi-sequence (`max_num_seqs>1`) graph replay in direct `mk_llama` path.

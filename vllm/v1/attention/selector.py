@@ -118,17 +118,19 @@ def _cached_get_attn_backend(
     ):
         from vllm.config import get_current_vllm_config
         from vllm.model_executor.models.megakernel_spec import (
-            validate_megakernel_llama_hf_only_or_raise,
+            get_megakernel_family_id,
+            validate_megakernel_family_hf_only_or_raise,
         )
 
         try:
-            validate_megakernel_llama_hf_only_or_raise(
-                get_current_vllm_config().model_config
-            )
-            attention_cls = (
-                "vllm.v1.attention.backends.megakernel_attn."
-                "MegakernelAttentionBackend"
-            )
+            model_config = get_current_vllm_config().model_config
+            family_id = get_megakernel_family_id(model_config)
+            if family_id and family_id in set(envs.VLLM_MEGAKERNEL_FAMILIES):
+                validate_megakernel_family_hf_only_or_raise(family_id, model_config)
+                attention_cls = (
+                    "vllm.v1.attention.backends.megakernel_attn."
+                    "MegakernelAttentionBackend"
+                )
         except Exception:
             # Keep default backend if model/shape does not match MK constraints.
             pass

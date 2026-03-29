@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,7 @@ from typing import Any
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
@@ -21,7 +21,7 @@ from vllm.model_executor.models.megakernel_runtime import (
     ensure_megakernel_sys_path,
 )
 from vllm.model_executor.models.megakernel_spec import (
-    validate_megakernel_llama_runtime_or_raise,
+    validate_megakernel_runtime_or_raise,
 )
 from vllm.model_executor.models.utils import make_empty_intermediate_tensors_factory
 from vllm.sequence import IntermediateTensors
@@ -40,7 +40,7 @@ class MegakernelLlamaForCausalLM(nn.Module, IsAttentionFree, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         del prefix
         super().__init__()
-        validate_megakernel_llama_runtime_or_raise(vllm_config)
+        validate_megakernel_runtime_or_raise(vllm_config)
         if not torch.cuda.is_available():
             raise ValueError("Megakernel Llama requires a CUDA device.")
         self.vllm_config = vllm_config
@@ -54,13 +54,10 @@ class MegakernelLlamaForCausalLM(nn.Module, IsAttentionFree, SupportsPP):
 
         self._token_logits: torch.Tensor | None = None
         self._logged_first_launch = False
-        self._pos_id_buf = torch.zeros(1, device="cuda", dtype=torch.int32)
         self._serving_ready = True
         self._use_megakernel = True
         self._parity_checked_tokens = 0
-        self._max_parity_tokens = int(
-            os.getenv("VLLM_MEGAKERNEL_PARITY_TOKENS", "0")
-        )
+        self._max_parity_tokens = envs.VLLM_MEGAKERNEL_PARITY_TOKENS
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(
@@ -117,13 +114,14 @@ class MegakernelLlamaForCausalLM(nn.Module, IsAttentionFree, SupportsPP):
                 f"({self._hidden_states_buf.shape[0]})."
             )
         hs = self._hidden_states_buf[:num_t]
-        hs.zero_()
         hs[:, 0] = self._token_index_buf[:num_t]
         self._token_logits = self._token_logits_buf[:num_t]
 
         from megakernels.model_types import BatchState  # type: ignore[import-not-found]
 
         is_capturing = torch.cuda.is_current_stream_capturing()
+        pos_i32 = positions.to(dtype=torch.int32)
+        globs = self._schedule.globs
         for t in range(num_t):
             if not self._logged_first_launch:
                 logger.info(
@@ -132,16 +130,15 @@ class MegakernelLlamaForCausalLM(nn.Module, IsAttentionFree, SupportsPP):
                 )
                 self._logged_first_launch = True
             tok = input_ids[t : t + 1].view(1, 1)
-            self._pos_id_buf.copy_(positions[t : t + 1].to(dtype=torch.int32))
+            pos_id = pos_i32[t : t + 1]
             bs = BatchState(input_ids=tok)
             emb = self._mk_model.model.embed_tokens(bs)
             assert emb.hidden_states is not None
             hidden_vec = emb.hidden_states.squeeze(0).squeeze(0).contiguous()
             if self._use_megakernel:
-                globs = self._schedule.globs
                 globs.hidden_states.copy_(hidden_vec)
                 globs.barriers.zero_()
-                globs.pos_id = self._pos_id_buf
+                globs.pos_id = pos_id
                 self._interpreter.interpret(globs)
                 mk_logits = globs.logits
                 self._token_logits[t].copy_(mk_logits)
@@ -152,8 +149,8 @@ class MegakernelLlamaForCausalLM(nn.Module, IsAttentionFree, SupportsPP):
                 ):
                     baseline_logits = self._baseline_logits(
                         input_ids=tok,
-                        position_id=self._pos_id_buf,
-                        seq_len=int(self._pos_id_buf.item()) + 1,
+                            position_id=pos_id,
+                            seq_len=int(pos_id.item()) + 1,
                         preserve_kv=True,
                     )
                     mk_token = int(torch.argmax(mk_logits).item())
@@ -172,8 +169,8 @@ class MegakernelLlamaForCausalLM(nn.Module, IsAttentionFree, SupportsPP):
             else:
                 baseline_logits = self._baseline_logits(
                     input_ids=tok,
-                    position_id=self._pos_id_buf,
-                    seq_len=int(self._pos_id_buf.item()) + 1,
+                    position_id=pos_id,
+                    seq_len=int(pos_id.item()) + 1,
                     preserve_kv=False,
                 )
                 self._token_logits[t].copy_(baseline_logits.to(torch.bfloat16))
@@ -232,7 +229,7 @@ class MegakernelLlamaForCausalLM(nn.Module, IsAttentionFree, SupportsPP):
 
         model_id = self.vllm_config.model_config.model
         configured_max_len = self.vllm_config.model_config.max_model_len
-        mk_max_len = int(os.getenv("VLLM_MEGAKERNEL_MAX_LEN", "4096"))
+        mk_max_len = envs.VLLM_MEGAKERNEL_MAX_LEN
         max_len = min(configured_max_len, mk_max_len)
         dev = self.vllm_config.device_config.device
         if isinstance(dev, str):
@@ -248,13 +245,13 @@ class MegakernelLlamaForCausalLM(nn.Module, IsAttentionFree, SupportsPP):
         extra = ExtraModelConfig(
             interleave_rope=True,
             max_len_override=max_len,
-            max_batch_size=1,
+            max_batch_size=max(1, min(envs.VLLM_MEGAKERNEL_MAX_BATCH_SIZE, self.vllm_config.scheduler_config.max_num_seqs)),
         )
         self._mk_model = LlamaForCausalLM.from_pretrained(
             model_id, device=device, dtype=dtype, extra_config=extra
         )
 
-        mk_dir = os.getenv("VLLM_MEGAKERNEL_MK_LLAMA_PATH")
+        mk_dir = envs.VLLM_MEGAKERNEL_MK_LLAMA_PATH
         if not mk_dir:
             raise ValueError(
                 "Set VLLM_MEGAKERNEL_MK_LLAMA_PATH to the directory containing "

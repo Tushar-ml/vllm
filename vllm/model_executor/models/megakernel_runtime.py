@@ -8,14 +8,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import vllm.envs as envs
+
 
 def ensure_megakernel_sys_path() -> None:
-    root = os.getenv("VLLM_MEGAKERNEL_ROOT")
+    root = envs.VLLM_MEGAKERNEL_ROOT
     if root:
         p = str(Path(root).resolve())
         if p not in sys.path:
             sys.path.insert(0, p)
-    mk_dir = os.getenv("VLLM_MEGAKERNEL_MK_LLAMA_PATH")
+    mk_dir = envs.VLLM_MEGAKERNEL_MK_LLAMA_PATH
     if mk_dir:
         p = str(Path(mk_dir).resolve())
         if p not in sys.path:

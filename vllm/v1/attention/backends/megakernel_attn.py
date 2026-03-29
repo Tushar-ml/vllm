@@ -1,8 +1,4 @@
-"""Megakernel-backed decode attention backend.
-
-Decode path uses a capture-safe tensor-only op wrapper and full vLLM metadata.
-Prefill path currently falls back to Triton attention implementation.
-"""
+"""Megakernel-backed attention backend wrappers for decode and prefill."""
 
 from __future__ import annotations
 
@@ -25,6 +21,9 @@ from vllm.v1.attention.backends.triton_attn import (
 )
 from vllm.v1.attention.ops.megakernel_decode_attention import (
     megakernel_decode_attention,
+)
+from vllm.v1.attention.ops.megakernel_prefill_attention import (
+    megakernel_prefill_attention,
 )
 
 
@@ -63,7 +62,7 @@ class MegakernelAttentionBackend(TritonAttentionBackend):
 
 
 class MegakernelAttentionImpl(TritonAttentionImpl):
-    """Decode-only Megakernel routing with Triton fallback for prefill."""
+    """Megakernel routing for decode and prefill op wrappers."""
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
@@ -87,19 +86,21 @@ class MegakernelAttentionImpl(TritonAttentionImpl):
         if attn_metadata is None:
             return output.fill_(0)
 
-        # Decode-only milestone: keep prefill behavior from Triton backend.
         if attn_metadata.max_query_len != 1:
-            return super().forward(
-                layer=layer,
-                query=query,
-                key=key,
-                value=value,
-                kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
-                output=output,
-                output_scale=output_scale,
-                output_block_scale=output_block_scale,
+            num_actual_tokens = attn_metadata.num_actual_tokens
+            megakernel_prefill_attention(
+                query=query[:num_actual_tokens],
+                key=key[:num_actual_tokens],
+                value=value[:num_actual_tokens],
+                output=output[:num_actual_tokens],
+                query_start_loc=attn_metadata.query_start_loc,
+                max_query_len=attn_metadata.max_query_len,
+                scale=self.scale,
+                alibi_slopes=self.alibi_slopes,
+                sliding_window=self.sliding_window,
+                logits_soft_cap=self.logits_soft_cap,
             )
+            return output
 
         key_cache, value_cache = kv_cache.unbind(1)
         if self.kv_cache_dtype.startswith("fp8"):
