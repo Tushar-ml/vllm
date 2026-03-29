@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document records the architectural changes made to integrate Megakernels into vLLM for `meta-llama/Llama-3.2-1B-Instruct`, plus the latest eager-mode latency benchmark.
+This document records the architectural changes made to integrate Megakernels into vLLM for `meta-llama/Llama-3.2-1B-Instruct`, plus latency benchmarks in **eager** mode and with **CUDA graphs** (`FULL_AND_PIECEWISE`).
 
 The current target is:
 
@@ -136,6 +136,44 @@ Notes:
 - These numbers are from a controlled local run on this machine and this model.
 - Absolute values can vary with load, networking, and thermal/GPU state.
 - Relative gain is the key signal and matches the expected large improvement trend.
+
+## FULL_AND_PIECEWISE Latency Benchmark (with and without Megakernel)
+
+Date: 2026-03-29
+
+Method:
+
+- Same model, prompt, and token limits as the eager benchmark above.
+- CUDA graph mode `-cc.cudagraph_mode=FULL_AND_PIECEWISE` (no `--enforce-eager`).
+- Same `max_model_len=4096`, same `max_num_seqs=1`.
+- Warmup requests executed before timed runs.
+- 15 measured requests per mode.
+- Metric: end-to-end `/v1/completions` request latency in milliseconds.
+
+Prompt:
+
+- `Write one short sentence about Paris.`
+
+Results:
+
+- Megakernel ON (`FULL_AND_PIECEWISE`):
+  - avg: `50.027 ms`
+  - p50: `50.037 ms`
+  - p95: `50.278 ms`
+- Megakernel OFF (`FULL_AND_PIECEWISE`):
+  - avg: `58.918 ms`
+  - p50: `58.750 ms`
+  - p95: `59.717 ms`
+
+Computed improvement:
+
+- Speedup: `1.178x`
+- Latency reduction: `15.09%`
+
+Notes:
+
+- With graphs enabled, both paths benefit from capture/replay; the absolute gap between Megakernel ON and OFF is smaller than in pure eager mode, but Megakernel ON remains faster on this run.
+- Same caveats as the eager benchmark: machine, load, and GPU state affect absolute numbers; relative comparison is the primary signal.
 
 ## Remaining Work
 
