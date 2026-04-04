@@ -378,6 +378,7 @@ class ExecuteModelState(NamedTuple):
 
     scheduler_output: "SchedulerOutput"
     logits: torch.Tensor
+    logits_indices: torch.Tensor
     spec_decode_metadata: SpecDecodeMetadata | None
     spec_decode_common_attn_metadata: CommonAttentionMetadata | None
     hidden_states: torch.Tensor
@@ -526,6 +527,12 @@ class GPUModelRunner(
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "token_recycling":
+                from vllm.v1.spec_decode.token_recycling_proposer import (
+                    TokenRecyclingProposer,
+                )
+
+                self.drafter = TokenRecyclingProposer(self.vllm_config)
             elif self.speculative_config.uses_draft_model():
                 self.drafter = DraftModelProposer(
                     vllm_config=self.vllm_config,
@@ -1060,6 +1067,17 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.method == "token_recycling"
+                and getattr(self, "drafter", None) is not None
+            ):
+                from vllm.v1.spec_decode.token_recycling_proposer import (
+                    TokenRecyclingProposer,
+                )
+
+                if isinstance(self.drafter, TokenRecyclingProposer):
+                    self.drafter.free_request(req_id)
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -2654,6 +2672,40 @@ class GPUModelRunner(
             logits_indices=logits_indices,
         )
 
+    def _update_token_recycling_matrices(
+        self,
+        logits: torch.Tensor,
+        logits_indices: torch.Tensor,
+    ) -> None:
+        spec = self.speculative_config
+        if spec is None or spec.method != "token_recycling":
+            return
+        from vllm.v1.spec_decode.token_recycling_proposer import TokenRecyclingProposer
+
+        if not isinstance(self.drafter, TokenRecyclingProposer):
+            return
+        num_logits = logits.shape[0]
+        if num_logits == 0:
+            return
+        li = logits_indices[:num_logits]
+        input_ids_gpu = self.input_ids.gpu
+        parent_ids = input_ids_gpu[li]
+        req_per_tok = self.req_indices.gpu[li]
+        num_reqs = self.input_batch.num_reqs
+        discard_gpu = self.discard_request_mask.gpu[:num_reqs].bool()
+        keep = ~discard_gpu[req_per_tok.long()]
+        if not keep.any():
+            return
+        k = spec.token_recycling_k
+        logits_kept = logits[:num_logits][keep]
+        _, topk = torch.topk(logits_kept.float(), k=k, dim=-1)
+        self.drafter.update_rows_gpu(
+            parent_ids[keep],
+            req_per_tok[keep],
+            topk,
+            self.input_batch.req_ids,
+        )
+
     def _prepare_kv_sharing_fast_prefill(
         self,
         logits_indices: torch.Tensor,
@@ -4090,6 +4142,7 @@ class GPUModelRunner(
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
             logits,
+            logits_indices,
             spec_decode_metadata,
             spec_decode_common_attn_metadata,
             hidden_states,
@@ -4134,6 +4187,7 @@ class GPUModelRunner(
         (
             scheduler_output,
             logits,
+            logits_indices,
             spec_decode_metadata,
             spec_decode_common_attn_metadata,
             hidden_states,
@@ -4151,6 +4205,11 @@ class GPUModelRunner(
             apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
+
+        self._update_token_recycling_matrices(
+            logits=logits,
+            logits_indices=logits_indices,
+        )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
@@ -4495,6 +4554,20 @@ class GPUModelRunner(
                 sampled_token_ids,
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
+                slot_mappings=slot_mappings,
+            )
+        elif spec_config.method == "token_recycling":
+            from vllm.v1.spec_decode.token_recycling_proposer import (
+                TokenRecyclingProposer,
+            )
+
+            assert isinstance(sampled_token_ids, list)
+            assert isinstance(self.drafter, TokenRecyclingProposer)
+            draft_token_ids = self.drafter.propose(
+                sampled_token_ids,
+                self.input_batch.num_tokens_no_spec,
+                self.input_batch.token_ids_cpu,
+                self.input_batch.req_ids,
                 slot_mappings=slot_mappings,
             )
         elif spec_config.use_ngram_gpu():

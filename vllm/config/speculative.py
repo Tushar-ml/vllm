@@ -54,6 +54,7 @@ EagleModelTypes = Literal[
 ]
 SpeculativeMethod = Literal[
     "ngram",
+    "token_recycling",
     "medusa",
     "mlp_speculator",
     "draft_model",
@@ -125,6 +126,12 @@ class SpeculativeConfig:
     for draft token generation. Reduces communication from O(vocab_size) to
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
+
+    # Token Recycling (arXiv:2408.08696) — train-free matrix drafting
+    token_recycling_k: int = Field(default=8, ge=1)
+    """Width of stored top-k successors per vocabulary id."""
+    token_recycling_matrix_path: str | None = None
+    """Optional path to a pre-built (vocab_size, k) int/long CPU matrix."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -368,6 +375,8 @@ class SpeculativeConfig:
         if self.method is None:
             if self.model in ("ngram", "[ngram]"):
                 self.method = "ngram"
+            elif self.model in ("token_recycling", "[token_recycling]"):
+                self.method = "token_recycling"
             else:
                 self.method = "draft_model"
 
@@ -393,6 +402,8 @@ class SpeculativeConfig:
                     self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
+            elif self.method == "token_recycling":
+                self.model = "token_recycling"
             elif self.method == "ngram_gpu":
                 self.model = "ngram_gpu"
             elif self.method == "suffix":
@@ -407,7 +418,12 @@ class SpeculativeConfig:
         if self.method in ("ngram", "[ngram]"):
             self.method = "ngram"
 
-        if self.method in ("ngram", "ngram_gpu"):
+        if self.method == "token_recycling":
+            self.prompt_lookup_max = 0
+            self.prompt_lookup_min = 0
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
+        elif self.method in ("ngram", "ngram_gpu"):
             # Set default values if not provided
             if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
                 # TODO(woosuk): Tune these values. They are arbitrarily chosen.
@@ -885,7 +901,8 @@ class SpeculativeConfig:
         method = self.method
         model = (
             None
-            if method in ("ngram", "suffix", "extract_hidden_states")
+            if method
+            in ("ngram", "token_recycling", "suffix", "extract_hidden_states")
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens
