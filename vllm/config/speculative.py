@@ -63,6 +63,7 @@ SpeculativeMethod = Literal[
     NgramGPUTypes,
 ]
 RejectionSampleMethod = Literal["strict", "probabilistic", "synthetic"]
+TokenRecyclingUpdateMode = Literal["all_logits", "bonus_only", "decode_only"]
 
 
 @config
@@ -132,6 +133,18 @@ class SpeculativeConfig:
     """Width of stored top-k successors per vocabulary id."""
     token_recycling_matrix_path: str | None = None
     """Optional path to a pre-built (vocab_size, k) int/long CPU matrix."""
+    token_recycling_update_mode: TokenRecyclingUpdateMode = "all_logits"
+    """Which logits rows update the matrix: all rows (default), bonus-only (one
+    row per request per step, fewer top-k ops), or decode_only (same rows as
+    all_logits but only when past the prompt phase)."""
+    token_recycling_max_rows_per_step: int | None = Field(default=None, ge=1)
+    """After deduplication, cap how many rows run top-k per step (None = no cap)."""
+    token_recycling_use_sparse_matrix: bool = False
+    """If True, store only non-zero rows in an LRU-backed map per request instead
+    of a dense (vocab, k) matrix (lower RAM, slightly slower propose)."""
+    token_recycling_sparse_max_rows: int | None = Field(default=None, ge=1)
+    """Max distinct token-id rows per request when sparse mode is enabled.
+    If None and sparse is enabled, defaults to 65536."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)

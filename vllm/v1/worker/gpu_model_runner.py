@@ -2676,32 +2676,98 @@ class GPUModelRunner(
         self,
         logits: torch.Tensor,
         logits_indices: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> None:
+        """Update Token Recycling matrices from target logits.
+
+        Logits are full-vocabulary tensors after ``LogitsProcessor`` gather
+        (``compute_logits``), so ``torch.topk`` is valid under tensor parallelism.
+        """
         spec = self.speculative_config
         if spec is None or spec.method != "token_recycling":
             return
-        from vllm.v1.spec_decode.token_recycling_proposer import TokenRecyclingProposer
+        from vllm.v1.spec_decode.token_recycling_proposer import (
+            TokenRecyclingProposer,
+            _dedupe_key_last,
+        )
 
         if not isinstance(self.drafter, TokenRecyclingProposer):
             return
         num_logits = logits.shape[0]
         if num_logits == 0:
             return
+        vs = self.input_batch.vocab_size
+        if logits.size(-1) != vs:
+            raise ValueError(
+                "token_recycling: logits last dim must match vocab_size "
+                f"({logits.size(-1)} vs {vs})."
+            )
+
         li = logits_indices[:num_logits]
         input_ids_gpu = self.input_ids.gpu
-        parent_ids = input_ids_gpu[li]
-        req_per_tok = self.req_indices.gpu[li]
+        parent_ids_full = input_ids_gpu[li]
+        req_per_full = self.req_indices.gpu[li].long()
         num_reqs = self.input_batch.num_reqs
         discard_gpu = self.discard_request_mask.gpu[:num_reqs].bool()
-        keep = ~discard_gpu[req_per_tok.long()]
-        if not keep.any():
-            return
+        device = logits.device
+        mode = spec.token_recycling_update_mode
+
+        if mode == "bonus_only":
+            if spec_decode_metadata is not None:
+                rows = spec_decode_metadata.bonus_logits_indices.long()[:num_reqs]
+            else:
+                rows = (self.query_start_loc.gpu[1 : num_reqs + 1] - 1).long()
+            rows = rows.clamp(min=0, max=num_logits - 1)
+            keep_req = ~discard_gpu[:num_reqs]
+            if not keep_req.any():
+                return
+            rows_k = rows[keep_req]
+            parent_ids = parent_ids_full[rows_k]
+            req_per = torch.arange(num_reqs, device=device, dtype=torch.long)[
+                keep_req
+            ]
+            logits_sel = logits[rows_k]
+        else:
+            keep = ~discard_gpu[req_per_full]
+            if mode == "decode_only":
+                npt = self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs].to(
+                    device
+                )
+                nct = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
+                    device
+                )
+                in_decode = nct[req_per_full] >= npt[req_per_full]
+                keep = keep & in_decode
+            if not keep.any():
+                return
+            k_idx = torch.arange(num_logits, device=device, dtype=torch.long)[keep]
+            parent_kept = parent_ids_full[keep]
+            req_kept = req_per_full[keep]
+            key = (
+                req_kept.cpu().numpy().astype(np.int64) * (vs + 1)
+                + parent_kept.cpu().numpy().astype(np.int64)
+            )
+            uniq_idx = _dedupe_key_last(key)
+            k_idx = k_idx[
+                torch.from_numpy(uniq_idx).to(
+                    device=k_idx.device, dtype=torch.long
+                )
+            ]
+            parent_ids = parent_ids_full[k_idx]
+            req_per = req_per_full[k_idx]
+            logits_sel = logits[k_idx]
+
+        mx = spec.token_recycling_max_rows_per_step
+        if mx is not None and logits_sel.shape[0] > mx:
+            logits_sel = logits_sel[-mx:]
+            parent_ids = parent_ids[-mx:]
+            req_per = req_per[-mx:]
+
         k = spec.token_recycling_k
-        logits_kept = logits[:num_logits][keep]
-        _, topk = torch.topk(logits_kept.float(), k=k, dim=-1)
-        self.drafter.update_rows_gpu(
-            parent_ids[keep],
-            req_per_tok[keep],
+        _, topk = torch.topk(logits_sel.float(), k=k, dim=-1)
+        self.drafter.stage_gpu_rows_then_update(
+            parent_ids,
+            req_per,
             topk,
             self.input_batch.req_ids,
         )
@@ -4209,6 +4275,7 @@ class GPUModelRunner(
         self._update_token_recycling_matrices(
             logits=logits,
             logits_indices=logits_indices,
+            spec_decode_metadata=spec_decode_metadata,
         )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
