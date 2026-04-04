@@ -55,6 +55,10 @@ class TokenRecyclingProposer:
         else:
             self._shared_bootstrap = None
 
+    def load_model(self, *args, **kwargs) -> None:
+        # No model to load (matrix-based drafting only).
+        pass
+
     def _ensure_matrix(self, req_id: str) -> torch.Tensor:
         m = self._matrices.get(req_id)
         if m is None:
