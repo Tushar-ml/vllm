@@ -5660,11 +5660,17 @@ class GPUModelRunner(
                 device=self.device,
                 dtype=logits.dtype,
             )
+            # FLy requires greedy sampling; the dummy sampler metadata uses
+            # all_greedy=False to warm the generic sampler path, but the
+            # rejection sampler must see greedy metadata or profile_run fails.
+            rejection_metadata = dummy_metadata
+            if self.speculative_config.rejection_sample_method == "fly":
+                rejection_metadata = replace(dummy_metadata, all_greedy=True)
             self.rejection_sampler(
                 dummy_spec_decode_metadata,
                 draft_probs,
                 logits,
-                dummy_metadata,
+                rejection_metadata,
             )
         return sampler_output
 
