@@ -61,7 +61,7 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
 ]
-RejectionSampleMethod = Literal["strict", "probabilistic", "synthetic"]
+RejectionSampleMethod = Literal["strict", "probabilistic", "synthetic", "fly"]
 
 
 @config
@@ -185,7 +185,18 @@ class SpeculativeConfig:
     """Whether to use strict (target and draft sampled tokens match exactly)
     or probabilistic rejection sampling. Both respect the target model
     distribution, but the latter yields a higher acceptance rate at the cost
-    of more memory to cache draft logits."""
+    of more memory to cache draft logits. The ``fly`` method implements
+    Training-Free Loosely Speculative Decoding (FLy); it does not preserve the
+    target distribution and is only supported for greedy decoding."""
+
+    fly_entropy_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    """Entropy gate threshold :math:`\\theta` for FLy (``rejection_sample_method``
+    ``fly``). Mismatches where the target distribution at that position has
+    normalized entropy below this value use standard (strict) rejection."""
+
+    fly_defer_window: int = Field(default=6, ge=0)
+    """Lookahead window size :math:`W` for FLy deferred mismatch decisions
+    (``rejection_sample_method`` ``fly``)."""
 
     synthetic_acceptance_rate: float | None = None
     """Average acceptance rate for synthetic rejection sampling. Draft
@@ -207,6 +218,9 @@ class SpeculativeConfig:
         the final hidden states.
         """
         factors: list[Any] = []
+        if self.rejection_sample_method == "fly":
+            factors.append(self.fly_entropy_threshold)
+            factors.append(self.fly_defer_window)
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
         uses_aux_hidden_states = self.method in (

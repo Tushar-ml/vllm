@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Sequence
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -17,6 +19,9 @@ from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+
+if TYPE_CHECKING:
+    from vllm.config import SpeculativeConfig
 
 logger = init_logger(__name__)
 
@@ -50,9 +55,14 @@ class RejectionSampler(nn.Module):
         output tokens = accepted tokens + recovered tokens + bonus tokens
     """
 
-    def __init__(self, sampler: Sampler):
+    def __init__(
+        self,
+        sampler: Sampler,
+        speculative_config: "SpeculativeConfig | None" = None,
+    ):
         super().__init__()
         self.sampler = sampler
+        self.speculative_config = speculative_config
         logprobs_mode = self.sampler.logprobs_mode
         self.is_processed_logprobs_mode = logprobs_mode.startswith("processed")
         self.is_logits_logprobs_mode = logprobs_mode.endswith("logits")
@@ -89,6 +99,16 @@ class RejectionSampler(nn.Module):
                 requested.
         """
         assert metadata.max_spec_len <= MAX_SPEC_LEN
+
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.rejection_sample_method == "fly"
+            and not sampling_metadata.all_greedy
+        ):
+            raise ValueError(
+                "FLy speculative decoding (rejection_sample_method='fly') "
+                "requires greedy sampling for all requests in the batch."
+            )
 
         bonus_logits_indices = metadata.bonus_logits_indices
         target_logits_indices = metadata.target_logits_indices
@@ -147,6 +167,7 @@ class RejectionSampler(nn.Module):
             target_logits,
             bonus_token_ids,
             sampling_metadata,
+            speculative_config=self.speculative_config,
         )
 
         logprobs_tensors = None
@@ -347,6 +368,92 @@ class RejectionSampler(nn.Module):
         return result
 
 
+def fly_greedy_rejection_sample(
+    output_token_ids: torch.Tensor,
+    draft_token_ids: torch.Tensor,
+    num_draft_tokens: list[int],
+    max_spec_len: int,
+    target_logits: torch.Tensor,
+    bonus_token_ids: torch.Tensor,
+    theta: float,
+    defer_window: int,
+) -> None:
+    """Training-Free Loosely Speculative Decoding (FLy) verification for greedy
+    sampling. Fills ``output_token_ids`` in place; see arXiv:2511.22972."""
+    batch_size = len(num_draft_tokens)
+    vocab_size = target_logits.shape[-1]
+    log_vocab = math.log(float(vocab_size))
+
+    target_probs = torch.softmax(target_logits.to(torch.float32), dim=-1)
+    clamped = target_probs.clamp(min=1e-20)
+    entropy = -(target_probs * torch.log(clamped)).sum(dim=-1)
+    h_norm = entropy / log_vocab
+    target_argmax = target_logits.argmax(dim=-1)
+
+    start_idx = 0
+    for req_idx in range(batch_size):
+        K = num_draft_tokens[req_idx]
+        end_idx = start_idx + K
+        row = output_token_ids[req_idx]
+        bonus_id = int(bonus_token_ids[req_idx, 0].item())
+
+        if K == 0:
+            row[0] = bonus_id
+            start_idx = end_idx
+            continue
+
+        d = draft_token_ids[start_idx:end_idx].to(torch.long)
+        ta = target_argmax[start_idx:end_idx]
+        h = h_norm[start_idx:end_idx]
+        delta = d == ta
+
+        # Paper uses 1-based indices for s_gate / s_defer / s_FLY; we use the
+        # same numeric values (1..K for draft positions, K+1 means full accept).
+        s_gate = K + 1
+        s_defer = K + 1
+        W = defer_window
+
+        for j in range(K):
+            if bool(delta[j].item()):
+                continue
+            hj = float(h[j].item())
+            if hj < theta:
+                s_gate = min(s_gate, j + 1)
+            else:
+                if j + W > K - 1:
+                    defer_reject = True
+                else:
+                    nw = 0
+                    for t in range(j + 1, j + W + 1):
+                        if t >= K:
+                            break
+                        if not bool(delta[t].item()):
+                            nw += 1
+                    defer_reject = nw > 0
+                if defer_reject:
+                    s_defer = min(s_defer, j + 1)
+
+        s_fly = min(s_gate, s_defer)
+
+        if s_fly == K + 1:
+            for i in range(K):
+                if bool(delta[i].item()):
+                    row[i] = ta[i].to(torch.int32)
+                else:
+                    row[i] = d[i].to(torch.int32)
+            row[K] = int(bonus_id)
+        else:
+            stop = s_fly
+            for i in range(stop - 1):
+                if bool(delta[i].item()):
+                    row[i] = ta[i].to(torch.int32)
+                else:
+                    row[i] = d[i].to(torch.int32)
+            row[stop - 1] = ta[stop - 1].to(torch.int32)
+
+        start_idx = end_idx
+
+
 def rejection_sample(
     # [num_tokens]
     draft_token_ids: torch.Tensor,
@@ -362,6 +469,7 @@ def rejection_sample(
     # [batch_size, 1]
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    speculative_config: "SpeculativeConfig | None" = None,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
@@ -377,6 +485,14 @@ def rejection_sample(
     assert bonus_token_ids.is_contiguous()
     assert target_logits.shape == (num_tokens, vocab_size)
 
+    use_fly = (
+        speculative_config is not None
+        and speculative_config.rejection_sample_method == "fly"
+    )
+    if use_fly and sampling_metadata.allowed_token_ids_mask is not None:
+        # Loose acceptance can violate grammar / structured-output constraints.
+        use_fly = False
+
     # Create output buffer.
     output_token_ids = torch.full(
         (batch_size, max_spec_len + 1),
@@ -391,16 +507,29 @@ def rejection_sample(
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
-        target_argmax = target_logits.argmax(dim=-1)
-        rejection_greedy_sample_kernel[(batch_size,)](
-            output_token_ids,
-            cu_num_draft_tokens,
-            draft_token_ids,
-            target_argmax,
-            bonus_token_ids,
-            is_greedy,
-            max_spec_len,
-        )
+        if use_fly:
+            assert speculative_config is not None
+            fly_greedy_rejection_sample(
+                output_token_ids,
+                draft_token_ids,
+                num_draft_tokens,
+                max_spec_len,
+                target_logits,
+                bonus_token_ids,
+                speculative_config.fly_entropy_threshold,
+                speculative_config.fly_defer_window,
+            )
+        else:
+            target_argmax = target_logits.argmax(dim=-1)
+            rejection_greedy_sample_kernel[(batch_size,)](
+                output_token_ids,
+                cu_num_draft_tokens,
+                draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+                is_greedy,
+                max_spec_len,
+            )
         if sampling_metadata.all_greedy:
             return output_token_ids
 
