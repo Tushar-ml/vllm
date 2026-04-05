@@ -230,6 +230,10 @@ class SchedulerOutput:
     # Used for adjusting acceptance rate calculation.
     num_invalid_spec_tokens: dict[str, int] | None = None
 
+    # PEARL pre-verify: full γ draft ids while scheduled_spec_decode_tokens lists
+    # only the first token for target-1 forward. None if unused.
+    pearl_full_spec_decode_tokens: dict[str, list[int]] | None = None
+
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
 
@@ -253,6 +257,7 @@ class SchedulerOutput:
             num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
+            pearl_full_spec_decode_tokens=None,
         )
 
 

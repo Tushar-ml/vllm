@@ -152,6 +152,12 @@ class SpeculativeConfig:
     draft/target process overlap from the reference implementation; it uses the
     standard single-forward verify pass and applies PEARL acceptance rules."""
 
+    pearl_overlap_streams: bool = False
+    """If True (with ``pearl_scheduling``), run draft proposal on a dedicated
+    CUDA stream and synchronize before bookkeeping. This is a scaffolding hook
+    for future true target/draft overlap; it does not overlap the target forward
+    with draft work by itself."""
+
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""

@@ -35,6 +35,8 @@ llm = LLM(
         "method": "draft_model",
         "num_speculative_tokens": 5,
         "pearl_scheduling": True,
+        # Optional: second CUDA stream for draft proposal (scaffold only).
+        # "pearl_overlap_streams": True,
     },
 )
 outputs = llm.generate(prompts, sampling_params)
@@ -42,7 +44,8 @@ outputs = llm.generate(prompts, sampling_params)
 
 ## Limitations
 
-- This port applies PEARL **acceptance policy** on the existing vLLM batched verify pass; it does **not** implement the reference implementation’s separate target 1-step vs draft γ-step scheduling or cross-GPU overlap.
+- **Pre-verify target-1:** When `pearl_scheduling` is on and a request is in **pre-verify** mode, the target forward schedules **one** speculative slot; full γ draft token ids are carried in `pearl_full_spec_decode_tokens` / internal request state so acceptance can still emit all γ drafts on success. **Post-verify** still uses γ target slots as before.
+- **Overlap:** Same-process wall-clock overlap of target vs draft forwards (reference Accelerate layout) is **not** implemented by default. See `pearl_overlap_streams` (scaffold) and [pearl_overlap_rfc.md](pearl_overlap_rfc.md).
 - For the authoritative reproduction code, see the [ParallelSpeculativeDecoding](https://github.com/smart-lty/ParallelSpeculativeDecoding) repository.
 
 ## Non-goals and residual gap vs the reference repo
@@ -54,23 +57,26 @@ vLLM intentionally does **not** aim for a clone of the HuggingFace + Accelerate 
 - **Default scope**: PEARL scheduling is validated for **`draft_model`** speculative decoding only; other speculative methods are out of scope unless explicitly extended later.
 - **Overlap for latency only**: Draft/target **overlap** (below) is optional product work and not required for **lossless** speculative semantics relative to the target model.
 
-## RFC: Pre-verify “target-1 forward” scheduling
+## Pre-verify target-1 scheduling (implemented)
 
-**Problem (gap vs paper):** In the reference, the target performs **one** forward from the shared prefix during a **pre-verify** step while the draft proposes γ tokens internally. vLLM today schedules **γ** target query positions per speculative step whenever drafts are present.
+When `pearl_scheduling` is enabled and `request.pearl_pre_verify` is true after
+`update_draft_token_ids`, the scheduler keeps `spec_token_ids` length **1** for
+token-budget / KV scheduling while storing the full γ list for metadata. The
+worker builds `SpecDecodeMetadata` so **target logits** use the single-slot
+layout and `target_logits_indices` repeats that row for all γ PEARL kernel
+positions. CUDA graphs are forced to **eager** (`force_eager`) for steps that
+use `pearl_full_spec_decode_tokens`.
 
-**Proposed direction (design only):**
+## Same-GPU stream scaffold (`pearl_overlap_streams`)
 
-1. **Scheduler**: When `pearl_scheduling` and `request.pearl_pre_verify`, set the effective number of **target** speculative positions to **1** for that step while the draft model still produces γ proposals. This implies **split** bookkeeping: full γ draft token storage vs a truncated schedule for the target forward.
-2. **Worker**: Adjust `_prepare_inputs` / `_calc_spec_decode_metadata` in `gpu_model_runner.py` (and related spec-decode metadata) so target logits rows align with a single slot in pre-verify, without breaking post-verify γ-wide steps.
-3. **KV / correctness**: Rely on existing `num_computed_tokens` rollback on rejection; add tests where pre-verify rejects after **one** target slot is written.
-4. **CUDA graphs / padding**: Expect to **disable or specialize** captured graphs for this mode because batch shapes and query lengths differ from the uniform-γ path.
+`pearl_overlap_streams: true` runs draft proposal on a dedicated CUDA stream and
+synchronizes before bookkeeping when any request is in PEARL pre-verify. This
+does **not** overlap the target forward with draft work; it only prepares a
+second stream for future extensions or minor overlap with host work.
 
-**Intentional remaining gap:** Even with target-1 scheduling, vLLM still does not reproduce the reference’s wall-clock **parallelism** between draft and target processes.
+## RFC: Multi-GPU / dual-engine overlap (Phase 2)
 
-## RFC (optional): Draft/target overlap
-
-**Reference behavior:** Accelerate-style `gather` overlapping draft and target processes.
-
-**Scope:** Engine-level or multi-worker coordination (`EngineCore`, possible multi-GPU draft+target KV invariants). This is **explicitly out of scope** for the default product: it targets paper-scale latency, not semantic equivalence.
-
-**Follow-on only:** Treat as a dedicated project with its own design review; keep disabled unless approved.
+See [pearl_overlap_rfc.md](pearl_overlap_rfc.md) for options (split worker
+groups, dual EngineCore, executor API changes), invariants, and risks. This
+remains **out of scope** for the default product until a dedicated design is
+approved.

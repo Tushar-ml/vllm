@@ -654,6 +654,16 @@ class GPUModelRunner(
             self.async_output_copy_stream = torch.cuda.Stream()
             self.prepare_inputs_event = torch.Event()
 
+        # Optional second stream for PEARL draft proposal (scaffold for overlap).
+        self._pearl_draft_stream: torch.cuda.Stream | None = None
+        _spec = self.vllm_config.speculative_config
+        if (
+            _spec is not None
+            and getattr(_spec, "pearl_overlap_streams", False)
+            and self.device.type == "cuda"
+        ):
+            self._pearl_draft_stream = torch.cuda.Stream()
+
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
             self.compilation_config.cudagraph_capture_sizes
@@ -2051,7 +2061,7 @@ class GPUModelRunner(
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
             # requests have draft tokens.
-            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            num_scheduled_draft = np.zeros(num_reqs, dtype=np.int32)
             # For chunked prefills, use -1 as mask rather than 0, as guided
             # decoding may rollback speculative tokens.
             num_decode_draft_tokens = np.full(num_reqs, -1, dtype=np.int32)
@@ -2061,17 +2071,27 @@ class GPUModelRunner(
             ) in scheduler_output.scheduled_spec_decode_tokens.items():
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 draft_len = len(draft_token_ids)
-                num_draft_tokens[req_idx] = draft_len
+                num_scheduled_draft[req_idx] = draft_len
                 if (
                     self.input_batch.num_computed_tokens_cpu[req_idx]
                     >= self.input_batch.num_prompt_tokens[req_idx]
                 ):
                     num_decode_draft_tokens[req_idx] = draft_len
+            num_kernel_draft = num_scheduled_draft.copy()
+            pearl_full = scheduler_output.pearl_full_spec_decode_tokens
+            if pearl_full:
+                for req_id, toks in pearl_full.items():
+                    req_idx = self.input_batch.req_id_to_index.get(req_id)
+                    if req_idx is not None:
+                        num_kernel_draft[req_idx] = len(toks)
             spec_decode_metadata = self._calc_spec_decode_metadata(
-                num_draft_tokens, cu_num_tokens
+                num_scheduled_draft,
+                num_kernel_draft,
+                cu_num_tokens,
+                pearl_full,
             )
             logits_indices = spec_decode_metadata.logits_indices
-            num_sampled_tokens = num_draft_tokens + 1
+            num_sampled_tokens = num_scheduled_draft + 1
             # For DECODE only cuda graph of some attention backends (e.g., GDN).
             self.num_decode_draft_tokens.np[:num_reqs] = num_decode_draft_tokens
             self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
@@ -2581,80 +2601,93 @@ class GPUModelRunner(
 
     def _calc_spec_decode_metadata(
         self,
-        num_draft_tokens: np.ndarray,
+        num_scheduled_draft: np.ndarray,
+        num_kernel_draft: np.ndarray,
         cu_num_scheduled_tokens: np.ndarray,
+        pearl_full: dict[str, list[int]] | None,
     ) -> SpecDecodeMetadata:
-        # Inputs:
-        # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
-        # num_draft_tokens:         [  3,   0,   2,   0,   1]
-        # Outputs:
-        # cu_num_draft_tokens:      [  3,   3,   5,   5,   6]
-        # logits_indices:           [  0,   1,   2,   3, 103, 104, 105, 106,
-        #                            206, 207, 208]
-        # target_logits_indices:    [  0,   1,   2,   5,   6,   9]
-        # bonus_logits_indices:     [  3,   4,   7,   8,  10]
+        # Logits layout follows scheduled draft slots (PEARL pre-verify: 1 slot).
+        # Kernel / rejection uses num_kernel_draft (full γ when pearl_full).
+        num_sampled_tokens_sched = num_scheduled_draft + 1
+        num_reqs = int(num_scheduled_draft.shape[0])
 
-        # Compute the logits indices.
-        # [4, 1, 3, 1, 2]
-        num_sampled_tokens = num_draft_tokens + 1
-        num_reqs = int(num_draft_tokens.shape[0])
-
-        # Step 1.
-        # cu_num_sampled_tokens: [4, 5, 8, 9, 11]
-        # _arange_scratch[:11]: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
         cu_num_sampled_tokens = self._get_cumsum_and_arange(
-            num_sampled_tokens, self._arange_scratch, cumsum_dtype=np.int32
+            num_sampled_tokens_sched, self._arange_scratch, cumsum_dtype=np.int32
         )
-        # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
         logits_indices = np.repeat(
-            cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens
+            cu_num_scheduled_tokens - num_sampled_tokens_sched,
+            num_sampled_tokens_sched,
         )
-        # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
         logits_indices += self._arange_scratch[: cu_num_sampled_tokens[-1]]
-
-        # Compute the bonus logits indices.
         bonus_logits_indices = cu_num_sampled_tokens - 1
 
-        # Compute the draft logits indices.
-        # cu_num_draft_tokens: [3, 3, 5, 5, 6]
-        # _arange_scratch[:6]: [0, 1, 2, 0, 1, 0]
-        cu_num_draft_tokens = self._get_cumsum_and_arange(
-            num_draft_tokens, self._arange_scratch, cumsum_dtype=np.int32
+        cu_num_draft_kernel = self._get_cumsum_and_arange(
+            num_kernel_draft, self._arange_scratch, cumsum_dtype=np.int32
         )
-        # [0, 0, 0, 5, 5, 9]
-        target_logits_indices = np.repeat(
-            cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens
-        )
-        # [0, 1, 2, 5, 6, 9]
-        target_logits_indices += self._arange_scratch[: cu_num_draft_tokens[-1]]
-
-        # TODO: Optimize the CPU -> GPU copy.
-        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
-            self.device, non_blocking=True
-        )
-        cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).to(
-            self.device, non_blocking=True
-        )
-        logits_indices = torch.from_numpy(logits_indices).to(
-            self.device, non_blocking=True
-        )
-        target_logits_indices = torch.from_numpy(target_logits_indices).to(
-            self.device, non_blocking=True
-        )
-        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
-            self.device, non_blocking=True
+        tli_parts: list[np.ndarray] = []
+        for req_idx in range(num_reqs):
+            nd_k = int(num_kernel_draft[req_idx])
+            if nd_k == 0:
+                continue
+            nd_s = int(num_scheduled_draft[req_idx])
+            start_idx = int(
+                cu_num_sampled_tokens[req_idx] - num_sampled_tokens_sched[req_idx]
+            )
+            if nd_k > nd_s:
+                tli_parts.append(np.full(nd_k, start_idx, dtype=np.int32))
+            else:
+                tli_parts.append(
+                    np.arange(start_idx, start_idx + nd_k, dtype=np.int32)
+                )
+        target_logits_indices = (
+            np.concatenate(tli_parts) if tli_parts else np.zeros(0, dtype=np.int32)
         )
 
-        # Compute the draft token ids.
-        # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
-        draft_token_ids = self.input_ids.gpu[logits_indices]
-        draft_token_ids = draft_token_ids[target_logits_indices + 1]
+        cu_num_draft_kernel_t = torch.from_numpy(cu_num_draft_kernel).to(
+            self.device, non_blocking=True
+        )
+        cu_num_sampled_tokens_t = torch.from_numpy(cu_num_sampled_tokens).to(
+            self.device, non_blocking=True
+        )
+        logits_indices_t = torch.from_numpy(logits_indices).to(
+            self.device, non_blocking=True
+        )
+        target_logits_indices_t = torch.from_numpy(target_logits_indices).to(
+            self.device, non_blocking=True
+        )
+        bonus_logits_indices_t = torch.from_numpy(bonus_logits_indices).to(
+            self.device, non_blocking=True
+        )
+
+        draft_from = self.input_ids.gpu[logits_indices_t]
+        draft_parts: list[torch.Tensor] = []
+        tli_cursor = 0
+        for req_idx in range(num_reqs):
+            nd_k = int(num_kernel_draft[req_idx])
+            if nd_k == 0:
+                continue
+            req_id = self.input_batch.req_ids[req_idx]
+            if pearl_full is not None and req_id in pearl_full:
+                toks = pearl_full[req_id]
+                draft_parts.append(
+                    torch.tensor(toks, dtype=torch.int32, device=self.device)
+                )
+                tli_cursor += nd_k
+            else:
+                tli_seg = target_logits_indices_t[tli_cursor : tli_cursor + nd_k]
+                tli_cursor += nd_k
+                draft_parts.append(draft_from[tli_seg + 1])
+        draft_token_ids = (
+            torch.cat(draft_parts)
+            if draft_parts
+            else torch.zeros(0, dtype=torch.int32, device=self.device)
+        )
 
         pearl_pre_verify_t: torch.Tensor | None = None
         if self.speculative_config is not None and self.speculative_config.pearl_scheduling:
             flags = np.zeros(num_reqs, dtype=np.int32)
             for req_idx in range(num_reqs):
-                if num_draft_tokens[req_idx] > 0:
+                if num_kernel_draft[req_idx] > 0:
                     req_id = self.input_batch.req_ids[req_idx]
                     if self.requests[req_id].pearl_pre_verify:
                         flags[req_idx] = 1
@@ -2664,12 +2697,12 @@ class GPUModelRunner(
 
         return SpecDecodeMetadata(
             draft_token_ids=draft_token_ids,
-            num_draft_tokens=num_draft_tokens.tolist(),
-            cu_num_draft_tokens=cu_num_draft_tokens,
-            cu_num_sampled_tokens=cu_num_sampled_tokens,
-            target_logits_indices=target_logits_indices,
-            bonus_logits_indices=bonus_logits_indices,
-            logits_indices=logits_indices,
+            num_draft_tokens=num_kernel_draft.tolist(),
+            cu_num_draft_tokens=cu_num_draft_kernel_t,
+            cu_num_sampled_tokens=cu_num_sampled_tokens_t,
+            target_logits_indices=target_logits_indices_t,
+            bonus_logits_indices=bonus_logits_indices_t,
+            logits_indices=logits_indices_t,
             pearl_pre_verify=pearl_pre_verify_t,
         )
 
@@ -3804,10 +3837,14 @@ class GPUModelRunner(
             spec_decode_tokens_copy = (
                 scheduler_output.scheduled_spec_decode_tokens.copy()
             )
+            pfull = scheduler_output.pearl_full_spec_decode_tokens
             scheduler_output = replace(
                 scheduler_output,
                 num_scheduled_tokens=num_scheduled_tokens_copy,
                 scheduled_spec_decode_tokens=spec_decode_tokens_copy,
+                pearl_full_spec_decode_tokens=(
+                    pfull.copy() if pfull is not None else None
+                ),
             )
 
         if has_kv_transfer_group():
@@ -3878,6 +3915,7 @@ class GPUModelRunner(
                     scheduler_output.num_common_prefix_blocks,
                 )
 
+            pearl_target1 = bool(scheduler_output.pearl_full_spec_decode_tokens)
             (
                 cudagraph_mode,
                 batch_desc,
@@ -3891,6 +3929,7 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                force_eager=pearl_target1,
             )
 
             logger.debug(
@@ -4194,7 +4233,8 @@ class GPUModelRunner(
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
-            with record_function_or_nullcontext("gpu_model_runner: draft"):
+
+            def run_draft_proposal():
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
                     sampled_token_ids,
@@ -4207,6 +4247,23 @@ class GPUModelRunner(
                     slot_mappings,
                 )
                 self._copy_draft_token_ids_to_cpu(scheduler_output)
+
+            _spec_cfg = self.speculative_config
+            use_pearl_draft_stream = (
+                self._pearl_draft_stream is not None
+                and _spec_cfg is not None
+                and getattr(_spec_cfg, "pearl_overlap_streams", False)
+                and spec_decode_metadata is not None
+                and spec_decode_metadata.pearl_pre_verify is not None
+                and bool(spec_decode_metadata.pearl_pre_verify.any().item())
+            )
+            with record_function_or_nullcontext("gpu_model_runner: draft"):
+                if use_pearl_draft_stream:
+                    with torch.cuda.stream(self._pearl_draft_stream):
+                        run_draft_proposal()
+                    torch.cuda.current_stream().wait_stream(self._pearl_draft_stream)
+                else:
+                    run_draft_proposal()
 
         spec_config = self.speculative_config
         propose_drafts_after_bookkeeping = False

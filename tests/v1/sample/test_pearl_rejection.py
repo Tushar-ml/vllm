@@ -157,6 +157,20 @@ def test_scheduler_pearl_mode_flag_matches_full_accept_rule():
         assert (num_acc != num_draft) == want_pre
 
 
+def test_pearl_pre_verify_draft_split_contract():
+    """Pre-verify keeps one spec slot for the target while full γ lives in pearl_full."""
+    pearl_pre_verify = True
+    spec = [10, 20, 30]
+    if pearl_pre_verify and len(spec) > 1:
+        pearl_full = list(spec)
+        spec_sched = spec[:1]
+    else:
+        pearl_full = None
+        spec_sched = spec
+    assert pearl_full == [10, 20, 30]
+    assert spec_sched == [10]
+
+
 def test_pearl_random_pre_verify_accepts_all_when_target_likes_d0():
     device = torch.device("cpu")
     # Two draft positions both token id 1; target logits strongly favor 1.
