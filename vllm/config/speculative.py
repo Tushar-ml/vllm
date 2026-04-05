@@ -202,8 +202,9 @@ class SpeculativeConfig:
     fly_entropy_mode: FlyEntropyMode = "full"
     """How to compute normalized entropy for FLy. ``full`` matches the paper
     (softmax over the full vocabulary). ``top_k`` approximates entropy using
-    only the top-``fly_entropy_top_k`` logits per position (faster). Argmax
-    for the gate always uses full logits."""
+    only the top-``fly_entropy_top_k`` logits per position (faster). In
+    ``top_k`` mode the draft–target greedy token is the top-1 among those
+    logits (same as full-vocab argmax when the true argmax lies in the top-k)."""
 
     fly_entropy_top_k: int = Field(default=1024, ge=2)
     """When ``fly_entropy_mode`` is ``top_k``, number of largest logits per
@@ -218,6 +219,11 @@ class SpeculativeConfig:
     fly_mla_ngram_tokens: int | None = None
     """Reserved for future hybrid n-gram prefix + draft-model suffix; currently
     unused (full-``K`` n-gram fast path only)."""
+
+    fly_use_triton_entropy: bool = False
+    """Reserved hook for a fused Triton kernel (single pass logits to argmax +
+    entropy). Not implemented yet; keep ``False``. Run a profiler before
+    enabling any future implementation."""
 
     synthetic_acceptance_rate: float | None = None
     """Average acceptance rate for synthetic rejection sampling. Draft
@@ -245,6 +251,7 @@ class SpeculativeConfig:
             factors.append(self.fly_entropy_mode)
             if self.fly_entropy_mode == "top_k":
                 factors.append(self.fly_entropy_top_k)
+            factors.append(self.fly_use_triton_entropy)
         if self.fly_mla:
             factors.append(True)
         # Eagle3 and extract_hidden_states affect the computation graph because

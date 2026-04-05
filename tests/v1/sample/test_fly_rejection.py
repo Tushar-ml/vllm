@@ -2,16 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for FLy (Training-Free Loosely Speculative Decoding) verification."""
 
+import math
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
-    _fly_h_norm_full_vocab,
-    _fly_h_norm_top_k,
+    _fly_argmax_and_h_norm_full,
+    _fly_argmax_and_h_norm_top_k,
+    _fly_compute_stop_indices_tensor,
+    _fly_h_norm_full_vocab_ref,
     fly_greedy_rejection_sample,
     rejection_sample,
 )
@@ -170,6 +174,7 @@ def test_rejection_sample_fly_end_to_end():
         fly_defer_window=2,
         fly_entropy_mode="full",
         fly_entropy_top_k=1024,
+        fly_use_triton_entropy=False,
     )
     out = rejection_sample(
         draft,
@@ -188,9 +193,93 @@ def test_rejection_sample_fly_end_to_end():
 
 def test_top_k_entropy_matches_full_when_k_covers_vocab():
     logits = torch.randn(6, 64, device=DEVICE)
-    hf = _fly_h_norm_full_vocab(logits)
-    ht = _fly_h_norm_top_k(logits, 64)
+    _, hf = _fly_argmax_and_h_norm_full(logits)
+    _, ht = _fly_argmax_and_h_norm_top_k(logits, 64)
     assert torch.allclose(hf, ht, rtol=1e-4, atol=1e-4)
+
+
+def test_fly_full_entropy_argmax_parity_vs_reference():
+    """Single log-softmax path matches softmax+entropy and logits argmax."""
+    torch.manual_seed(0)
+    logits = torch.randn(4, 32, device=DEVICE)
+    ta_new, h_new = _fly_argmax_and_h_norm_full(logits)
+    h_ref = _fly_h_norm_full_vocab_ref(logits)
+    ta_ref = logits.argmax(dim=-1)
+    assert torch.equal(ta_new, ta_ref)
+    assert torch.allclose(h_new, h_ref, rtol=1e-5, atol=1e-5)
+
+
+def test_fly_top_k_argmax_entropy_parity_vs_two_pass():
+    """top_k path: argmax from top-1 index and h_norm match two-pass reference."""
+    torch.manual_seed(1)
+    V, k = 128, 16
+    logits = torch.randn(5, V, device=DEVICE)
+    ta_new, h_new = _fly_argmax_and_h_norm_top_k(logits, k)
+    vals, idx = torch.topk(logits, k, dim=-1)
+    ta_ref = idx[:, 0]
+    sub = torch.softmax(vals.to(torch.float32), dim=-1)
+    clamped = sub.clamp(min=1e-20)
+    entropy = -(sub * torch.log(clamped)).sum(dim=-1)
+    h_ref = entropy / math.log(float(k))
+    assert torch.equal(ta_new, ta_ref.to(torch.long))
+    assert torch.allclose(h_new, h_ref, rtol=1e-5, atol=1e-5)
+
+
+def test_fly_stop_indices_tensor_matches_loop_reference():
+    """Tensorized stop indices match sequential reference (CPU gold)."""
+    torch.manual_seed(2)
+    for _ in range(32):
+        K = int(torch.randint(1, 9, (1,)).item())
+        W = int(torch.randint(0, 8, (1,)).item())
+        theta = 0.35
+        delta = torch.rand(K, device=DEVICE) > 0.5
+        h = torch.rand(K, device=DEVICE)
+
+        def ref_s_gate():
+            strict = (~delta) & (h < theta)
+            if not bool(strict.any().item()):
+                return K + 1
+            j = int(torch.nonzero(strict, as_tuple=False)[0, 0].item())
+            return j + 1
+
+        def ref_s_defer():
+            s_defer = K + 1
+            for j in range(K):
+                if bool(delta[j].item()):
+                    continue
+                if bool((h[j] < theta).item()):
+                    continue
+                if j + W > K - 1:
+                    s_defer = min(s_defer, j + 1)
+                else:
+                    seg = delta[j + 1 : j + W + 1]
+                    if bool((~seg).any().item()):
+                        s_defer = min(s_defer, j + 1)
+            return s_defer
+
+        sg_e = ref_s_gate()
+        sd_e = ref_s_defer()
+        sg_t, sd_t = _fly_compute_stop_indices_tensor(
+            delta, h, theta, K, W
+        )
+        assert int(sg_t.item()) == sg_e
+        assert int(sd_t.item()) == sd_e
+
+
+def test_fly_use_triton_entropy_raises():
+    out = torch.zeros(1, 2, dtype=torch.int32, device=DEVICE)
+    with pytest.raises(NotImplementedError):
+        fly_greedy_rejection_sample(
+            out,
+            torch.zeros(1, dtype=torch.int32, device=DEVICE),
+            [1],
+            1,
+            torch.zeros(1, 4, device=DEVICE),
+            torch.tensor([[0]], dtype=torch.int32, device=DEVICE),
+            theta=0.3,
+            defer_window=1,
+            use_triton_entropy=True,
+        )
 
 
 def test_fly_loose_accept_top_k_mode_agrees_with_full():

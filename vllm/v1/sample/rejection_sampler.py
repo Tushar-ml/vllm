@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
@@ -368,8 +369,50 @@ class RejectionSampler(nn.Module):
         return result
 
 
-def _fly_h_norm_full_vocab(logits: torch.Tensor) -> torch.Tensor:
-    """Normalized entropy h in [0, 1] per row (paper Eq. 5)."""
+def _fly_argmax_and_h_norm_full(
+    logits: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Single log-softmax pass: greedy argmax ids and normalized entropy (Eq. 5)."""
+    vocab_size = logits.shape[-1]
+    log_vocab = math.log(float(vocab_size))
+    log_probs = F.log_softmax(logits.to(torch.float32), dim=-1)
+    target_argmax = log_probs.argmax(dim=-1)
+    entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
+    h_norm = entropy / log_vocab
+    return target_argmax, h_norm
+
+
+def _fly_argmax_and_h_norm_top_k(
+    logits: torch.Tensor,
+    top_k: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """One top-k pass: argmax from top-1 index, entropy on softmax over top-k."""
+    vocab_size = logits.shape[-1]
+    k = min(int(top_k), vocab_size)
+    vals, idx = torch.topk(logits, k, dim=-1)
+    target_argmax = idx[:, 0].to(torch.long)
+    sub = torch.softmax(vals.to(torch.float32), dim=-1)
+    clamped = sub.clamp(min=1e-20)
+    entropy = -(sub * torch.log(clamped)).sum(dim=-1)
+    log_k = math.log(float(k))
+    h_norm = entropy / log_k
+    return target_argmax, h_norm
+
+
+def _fly_argmax_and_h_norm(
+    logits: torch.Tensor,
+    entropy_mode: str,
+    entropy_top_k: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if entropy_mode == "full":
+        return _fly_argmax_and_h_norm_full(logits)
+    if entropy_mode == "top_k":
+        return _fly_argmax_and_h_norm_top_k(logits, entropy_top_k)
+    raise ValueError(f"Unknown fly entropy mode: {entropy_mode}")
+
+
+# Reference implementations for tests / parity checks (two-pass).
+def _fly_h_norm_full_vocab_ref(logits: torch.Tensor) -> torch.Tensor:
     vocab_size = logits.shape[-1]
     log_vocab = math.log(float(vocab_size))
     target_probs = torch.softmax(logits.to(torch.float32), dim=-1)
@@ -378,63 +421,43 @@ def _fly_h_norm_full_vocab(logits: torch.Tensor) -> torch.Tensor:
     return entropy / log_vocab
 
 
-def _fly_h_norm_top_k(logits: torch.Tensor, top_k: int) -> torch.Tensor:
-    """Approximate normalized entropy using softmax only over the top-k logits.
-
-    A fused Triton kernel (top-k + softmax + entropy) may be added later if
-    profiling shows this path is hot; keep ``full`` as the reference.
-    """
-    vocab_size = logits.shape[-1]
-    k = min(int(top_k), vocab_size)
-    vals, _ = torch.topk(logits, k, dim=-1)
-    sub = torch.softmax(vals.to(torch.float32), dim=-1)
-    clamped = sub.clamp(min=1e-20)
-    entropy = -(sub * torch.log(clamped)).sum(dim=-1)
-    log_k = math.log(float(k))
-    return entropy / log_k
-
-
-def _fly_compute_h_norm(
-    logits: torch.Tensor,
-    entropy_mode: str,
-    entropy_top_k: int,
-) -> torch.Tensor:
-    if entropy_mode == "full":
-        return _fly_h_norm_full_vocab(logits)
-    if entropy_mode == "top_k":
-        return _fly_h_norm_top_k(logits, entropy_top_k)
-    raise ValueError(f"Unknown fly entropy mode: {entropy_mode}")
-
-
-def _fly_compute_stop_indices(
+def _fly_compute_stop_indices_tensor(
     delta: torch.Tensor,
     h: torch.Tensor,
     theta: float,
     K: int,
     W: int,
-) -> tuple[int, int]:
-    """Return (s_gate, s_defer) as 1-based paper indices (K+1 means no stop)."""
-    # s_gate: earliest strict mismatch (low entropy at mismatch)
-    strict = (~delta) & (h < theta)
-    if bool(strict.any().item()):
-        first = int(torch.nonzero(strict, as_tuple=False)[0, 0].item())
-        s_gate = first + 1
-    else:
-        s_gate = K + 1
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return (s_gate, s_defer) as 0-dim int64 tensors (1-based; K+1 = no stop)."""
+    device = delta.device
+    j_1d = torch.arange(K, device=device, dtype=torch.long)
+    hi = torch.as_tensor(theta, device=device, dtype=h.dtype)
 
-    s_defer = K + 1
-    for j in range(K):
-        if bool(delta[j].item()):
-            continue
-        hj = h[j]
-        if bool((hj < theta).item()):
-            continue
-        if j + W > K - 1:
-            s_defer = min(s_defer, j + 1)
-        else:
-            seg = delta[j + 1 : j + W + 1]
-            if bool((~seg).any().item()):
-                s_defer = min(s_defer, j + 1)
+    # s_gate: earliest strict mismatch (low entropy at mismatch)
+    strict = (~delta) & (h < hi)
+    big = torch.iinfo(torch.long).max
+    masked_gate = torch.where(strict, j_1d, big)
+    s_gate = torch.where(
+        strict.any(),
+        masked_gate.min() + 1,
+        torch.tensor(K + 1, device=device, dtype=torch.long),
+    )
+
+    # s_defer: defer branch rejects
+    boundary = j_1d + W > K - 1
+    col = torch.arange(1, W + 1, device=device, dtype=torch.long).view(1, -1)
+    grid = j_1d.unsqueeze(1) + col
+    valid = grid < K
+    idx_safe = grid.clamp(max=max(K - 1, 0))
+    mism = ~delta[idx_safe]
+    window_mismatch = (mism & valid).any(dim=1)
+    defer_reject_at = (~delta) & (h >= hi) & (boundary | window_mismatch)
+    masked_def = torch.where(defer_reject_at, j_1d, big)
+    s_defer = torch.where(
+        defer_reject_at.any(),
+        masked_def.min() + 1,
+        torch.tensor(K + 1, device=device, dtype=torch.long),
+    )
 
     return s_gate, s_defer
 
@@ -450,12 +473,20 @@ def fly_greedy_rejection_sample(
     defer_window: int,
     entropy_mode: str = "full",
     entropy_top_k: int = 1024,
+    use_triton_entropy: bool = False,
 ) -> None:
     """Training-Free Loosely Speculative Decoding (FLy) verification for greedy
     sampling. Fills ``output_token_ids`` in place; see arXiv:2511.22972."""
+    if use_triton_entropy:
+        raise NotImplementedError(
+            "fly_use_triton_entropy is not implemented yet; profile first, "
+            "then add a fused kernel."
+        )
+
     batch_size = len(num_draft_tokens)
-    h_norm = _fly_compute_h_norm(target_logits, entropy_mode, entropy_top_k)
-    target_argmax = target_logits.argmax(dim=-1)
+    target_argmax, h_norm = _fly_argmax_and_h_norm(
+        target_logits, entropy_mode, entropy_top_k
+    )
 
     start_idx = 0
     for req_idx in range(batch_size):
@@ -474,16 +505,17 @@ def fly_greedy_rejection_sample(
         h = h_norm[start_idx:end_idx]
         delta = d == ta
 
-        s_gate, s_defer = _fly_compute_stop_indices(
+        s_gate, s_defer = _fly_compute_stop_indices_tensor(
             delta, h, theta, K, defer_window
         )
-        s_fly = min(s_gate, s_defer)
+        s_fly = torch.minimum(s_gate, s_defer)
+        s_fly_i = int(s_fly.item())
 
-        if s_fly == K + 1:
+        if s_fly_i == K + 1:
             row[:K] = torch.where(delta, ta, d).to(torch.int32)
-            row[K] = int(bonus_id)
+            row[K] = bonus_id
         else:
-            stop = s_fly
+            stop = s_fly_i
             row[: stop - 1] = torch.where(
                 delta[: stop - 1], ta[: stop - 1], d[: stop - 1]
             ).to(torch.int32)
@@ -558,6 +590,9 @@ def rejection_sample(
                 speculative_config.fly_defer_window,
                 entropy_mode=speculative_config.fly_entropy_mode,
                 entropy_top_k=speculative_config.fly_entropy_top_k,
+                use_triton_entropy=getattr(
+                    speculative_config, "fly_use_triton_entropy", False
+                ),
             )
         else:
             target_argmax = target_logits.argmax(dim=-1)
