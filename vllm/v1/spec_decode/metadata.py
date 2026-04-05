@@ -22,6 +22,8 @@ class SpecDecodeMetadata:
     bonus_logits_indices: torch.Tensor
     # [num_tokens + batch_size]
     logits_indices: torch.Tensor
+    # [batch_size] int32 0/1; PEARL pre-verify mode per request (draft steps only).
+    pearl_pre_verify: torch.Tensor | None = None
 
     def __post_init__(self):
         self.max_spec_len = max(self.num_draft_tokens)
@@ -63,4 +65,5 @@ class SpecDecodeMetadata:
             target_logits_indices=target_logits_indices,
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,
+            pearl_pre_verify=None,
         )

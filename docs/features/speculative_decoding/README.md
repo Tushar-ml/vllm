@@ -11,6 +11,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [EAGLE](eagle.md)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [Draft Model](draft_model.md)
+- [PEARL scheduling (draft model)](pearl.md)
 - [Parallel Draft Model (PARD)](parallel_draft_model.md)
 - [Multi-Layer Perceptron](mlp.md)
 - [N-Gram](n_gram.md)
@@ -26,6 +27,7 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | EAGLE | High gain | Medium to high gain | Strong general-purpose model-based method. |
 | MTP | High gain | Medium to high gain | Best when the target model has native MTP support. |
 | Draft model | High gain | Medium gain | Needs a separate draft model. |
+| PEARL (draft model) | Varies | Varies | Adaptive pre/post-verify scheduling; greedy path in vLLM. |
 | Parallel Draft Model | High gain | Medium to high gain | Low draft model latency. |
 | MLP speculator | Medium to high gain | Medium gain | Good when compatible MLP speculators are available. |
 | N-gram | Low to medium gain | Medium gain | Lightweight and easy to enable. |

@@ -101,6 +101,9 @@ class Scheduler(SchedulerInterface):
         )
         self.prev_step_scheduled_req_ids: set[str] = set()
 
+        sc = vllm_config.speculative_config
+        self._pearl_scheduling: bool = sc is not None and sc.pearl_scheduling
+
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = (
@@ -374,6 +377,7 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        pearl_full_spec_decode_tokens: dict[str, list[int]] = {}
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -484,6 +488,7 @@ class Scheduler(SchedulerInterface):
                             token_budget += num_scheduled_tokens.pop(preempted_req_id)
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                            pearl_full_spec_decode_tokens.pop(preempted_req_id, None)
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(
                                 preempted_req_id, None
                             )
@@ -529,6 +534,12 @@ class Scheduler(SchedulerInterface):
                     spec_token_ids = request.spec_token_ids
                     if len(spec_token_ids) > num_scheduled_spec_tokens:
                         spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
+                    if request.pearl_full_spec_token_ids is not None:
+                        assert self._pearl_scheduling
+                        pearl_full_spec_decode_tokens[request.request_id] = (
+                            request.pearl_full_spec_token_ids
+                        )
+                        request.pearl_full_spec_token_ids = None
                     scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
 
                 # New spec tokens will be set in `update_draft_token_ids` before the
@@ -927,6 +938,11 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            pearl_full_spec_decode_tokens=(
+                pearl_full_spec_decode_tokens
+                if pearl_full_spec_decode_tokens
+                else None
+            ),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1066,6 +1082,9 @@ class Scheduler(SchedulerInterface):
         all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
+        pearl_pre_verify: list[bool] | None = (
+            [] if self._pearl_scheduling else None
+        )
         resumed_req_ids = set()
 
         num_running_reqs = len(running_reqs)
@@ -1101,6 +1120,8 @@ class Scheduler(SchedulerInterface):
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders
             )
+            if pearl_pre_verify is not None:
+                pearl_pre_verify.append(req.pearl_pre_verify)
 
         return CachedRequestData(
             req_ids=req_ids,
@@ -1110,6 +1131,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
+            pearl_pre_verify=pearl_pre_verify,
         )
 
     def _try_schedule_encoder_inputs(
@@ -1367,7 +1389,11 @@ class Scheduler(SchedulerInterface):
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
             if scheduled_spec_token_ids and generated_token_ids:
-                num_draft_tokens = len(scheduled_spec_token_ids)
+                pearl_full = scheduler_output.pearl_full_spec_decode_tokens
+                if pearl_full and req_id in pearl_full:
+                    num_draft_tokens = len(pearl_full[req_id])
+                else:
+                    num_draft_tokens = len(scheduled_spec_token_ids)
                 num_accepted = len(generated_token_ids) - 1
                 num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
@@ -1388,6 +1414,9 @@ class Scheduler(SchedulerInterface):
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
                 )
+                if self._pearl_scheduling:
+                    # PEARL: full accept -> post-verify (False); else pre-verify (True).
+                    request.pearl_pre_verify = num_accepted != num_draft_tokens
 
             stopped = False
             new_logprobs = None
@@ -1680,13 +1709,21 @@ class Scheduler(SchedulerInterface):
                 # Ignore draft tokens for prefill chunks.
                 if request.spec_token_ids:
                     request.spec_token_ids = []
+                request.pearl_full_spec_token_ids = None
                 continue
 
             # Add newly generated spec token ids to the request.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
-            request.spec_token_ids = spec_token_ids
+            if self._pearl_scheduling and request.pearl_pre_verify and len(
+                spec_token_ids
+            ) > 1:
+                request.pearl_full_spec_token_ids = list(spec_token_ids)
+                request.spec_token_ids = spec_token_ids[:1]
+            else:
+                request.spec_token_ids = spec_token_ids
+                request.pearl_full_spec_token_ids = None
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
@@ -1694,6 +1731,7 @@ class Scheduler(SchedulerInterface):
         num_invalid_spec_tokens: dict[str, int] = {}
 
         sched_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+        pearl_full = scheduler_output.pearl_full_spec_decode_tokens
         for req_id, spec_token_ids in zip(
             draft_token_ids.req_ids,
             draft_token_ids.draft_token_ids,
@@ -1708,6 +1746,8 @@ class Scheduler(SchedulerInterface):
                 continue
 
             orig_num_spec_tokens = len(placeholder_spec_tokens)
+            if pearl_full is not None and req_id in pearl_full:
+                pearl_full[req_id] = list(spec_token_ids)
             # Trim drafts to scheduled number of spec tokens
             # (needed for chunked prefill case for example).
             del spec_token_ids[orig_num_spec_tokens:]

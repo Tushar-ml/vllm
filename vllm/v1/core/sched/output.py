@@ -122,6 +122,8 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
+    # Parallel to req_ids: PEARL pre-verify flag when pearl_scheduling is enabled.
+    pearl_pre_verify: list[bool] | None = None
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
@@ -172,6 +174,7 @@ class CachedRequestData:
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
+            pearl_pre_verify=None,
         )
 
 
@@ -227,6 +230,10 @@ class SchedulerOutput:
     # Used for adjusting acceptance rate calculation.
     num_invalid_spec_tokens: dict[str, int] | None = None
 
+    # PEARL pre-verify: full γ draft ids while scheduled_spec_decode_tokens lists
+    # only the first token for target-1 forward. None if unused.
+    pearl_full_spec_decode_tokens: dict[str, list[int]] | None = None
+
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
 
@@ -250,6 +257,7 @@ class SchedulerOutput:
             num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
+            pearl_full_spec_decode_tokens=None,
         )
 
 

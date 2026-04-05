@@ -144,6 +144,20 @@ class SpeculativeConfig:
     requires the speculative model be trained to support parallel drafting.
     Only compatible with EAGLE and draft model methods."""
 
+    pearl_scheduling: bool = False
+    """If True, use PEARL (Parallel spEculative decoding with Adaptive dRaft
+    Length) pre-verify / post-verify scheduling for greedy draft-model
+    speculative decoding (ICLR 2025). This is orthogonal to ``parallel_drafting``
+    (PARD). Requires ``method`` ``draft_model``. Does not reproduce multi-GPU
+    draft/target process overlap from the reference implementation; it uses the
+    standard single-forward verify pass and applies PEARL acceptance rules."""
+
+    pearl_overlap_streams: bool = False
+    """If True (with ``pearl_scheduling``), run draft proposal on a dedicated
+    CUDA stream and synchronize before bookkeeping. This is a scaffolding hook
+    for future true target/draft overlap; it does not overlap the target forward
+    with draft work by itself."""
+
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""
@@ -831,6 +845,24 @@ class SpeculativeConfig:
                 f" models. Got {self.target_model_config.hf_text_config.model_type=}"
             )
         self.verify_equal_vocab_size_if_draft_model()
+        if self.pearl_scheduling:
+            if not self.uses_draft_model():
+                raise ValueError(
+                    "pearl_scheduling requires speculative_config method "
+                    "'draft_model'."
+                )
+            if self.parallel_drafting:
+                raise ValueError(
+                    "pearl_scheduling is incompatible with parallel_drafting (PARD)."
+                )
+            if self.rejection_sample_method not in ("strict", "probabilistic"):
+                raise ValueError(
+                    "pearl_scheduling only supports rejection_sample_method "
+                    "'strict' or 'probabilistic' (greedy batches use the PEARL "
+                    "greedy path; all-random batches use the PEARL random path when "
+                    "draft probabilities are unavailable, otherwise "
+                    "'probabilistic' is required for that path)."
+                )
         return self
 
     def verify_equal_vocab_size_if_draft_model(self):

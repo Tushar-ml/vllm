@@ -135,6 +135,13 @@ class Request:
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
 
+        # PEARL (draft-model speculative decoding): True = pre-verify mode,
+        # False = post-verify mode. Ignored unless speculative_config.pearl_scheduling.
+        self.pearl_pre_verify: bool = True
+        # Full γ drafts when pre-verify schedules only one target slot; consumed in
+        # schedule(). Ignored unless pearl_scheduling.
+        self.pearl_full_spec_token_ids: list[int] | None = None
+
         # Multi-modal related
         self.mm_features = mm_features or []
 
