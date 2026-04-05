@@ -571,6 +571,12 @@ class RejectionSampler:
                 self.decay_factor,
                 self.num_speculative_steps,
             )
+        elif self.rejection_sample_method == "fly":
+            raise ValueError(
+                "rejection_sample_method='fly' (FLy) is not supported on this "
+                "GPU worker path; use the V1 gpu_model_runner speculative "
+                "decoding stack instead."
+            )
         else:
             raise ValueError(
                 f"Unknown rejection sample method: {self.rejection_sample_method}"

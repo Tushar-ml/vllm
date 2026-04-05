@@ -57,11 +57,13 @@ SpeculativeMethod = Literal[
     "medusa",
     "mlp_speculator",
     "draft_model",
+    "ssd",
     "suffix",
     EagleModelTypes,
     NgramGPUTypes,
 ]
-RejectionSampleMethod = Literal["strict", "probabilistic", "synthetic"]
+RejectionSampleMethod = Literal["strict", "probabilistic", "synthetic", "fly"]
+FlyEntropyMode = Literal["full", "top_k"]
 
 
 @config
@@ -144,6 +146,34 @@ class SpeculativeConfig:
     requires the speculative model be trained to support parallel drafting.
     Only compatible with EAGLE and draft model methods."""
 
+    # Speculative Speculative Decoding (SSD); see vllm.v1.spec_decode.ssd.reference
+    ssd_async: bool = False
+    """If True, request the dedicated-draft-GPU layout from the SSD paper
+    (``world_size == tensor_parallel_size + 1``). v1 falls back to colocated
+    draft execution with a warning when the layout does not match."""
+
+    ssd_async_fan_out: int = Field(default=3, ge=1)
+    """Per-position fan-out ``f`` for async speculation (reference default)."""
+
+    ssd_fan_out_list: list[int] | None = None
+    """Length ``K+1`` list of fan-outs per verify position; sums to message-queue
+    length in the reference engine. If None, uses ``ssd_async_fan_out`` for
+    every position."""
+
+    ssd_fan_out_list_miss: list[int] | None = None
+    """Fan-out list on cache miss; must sum to the same total as
+    ``ssd_fan_out_list`` in the reference config."""
+
+    ssd_jit_speculate: bool = False
+    """If True, ratio-based acceptance does not require async cache hits (SSD
+    ``jit_speculate`` flag)."""
+
+    ssd_sampler_x: float | None = None
+    """Optional top-mass rescaling of draft probabilities during verification."""
+
+    ssd_use_eagle: bool = False
+    """Reserved: draft conditioned on target hidden states (EAGLE + SSD)."""
+
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""
@@ -185,7 +215,44 @@ class SpeculativeConfig:
     """Whether to use strict (target and draft sampled tokens match exactly)
     or probabilistic rejection sampling. Both respect the target model
     distribution, but the latter yields a higher acceptance rate at the cost
-    of more memory to cache draft logits."""
+    of more memory to cache draft logits. The ``fly`` method implements
+    Training-Free Loosely Speculative Decoding (FLy); it does not preserve the
+    target distribution and is only supported for greedy decoding."""
+
+    fly_entropy_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    """Entropy gate threshold :math:`\\theta` for FLy (``rejection_sample_method``
+    ``fly``). Mismatches where the target distribution at that position has
+    normalized entropy below this value use standard (strict) rejection."""
+
+    fly_defer_window: int = Field(default=6, ge=0)
+    """Lookahead window size :math:`W` for FLy deferred mismatch decisions
+    (``rejection_sample_method`` ``fly``)."""
+
+    fly_entropy_mode: FlyEntropyMode = "full"
+    """How to compute normalized entropy for FLy. ``full`` matches the paper
+    (softmax over the full vocabulary). ``top_k`` approximates entropy using
+    only the top-``fly_entropy_top_k`` logits per position (faster). In
+    ``top_k`` mode the draft–target greedy token is the top-1 among those
+    logits (same as full-vocab argmax when the true argmax lies in the top-k)."""
+
+    fly_entropy_top_k: int = Field(default=1024, ge=2)
+    """When ``fly_entropy_mode`` is ``top_k``, number of largest logits per
+    position used for entropy approximation."""
+
+    fly_mla: bool = False
+    """Multi-level acceleration for draft-model speculative decoding: try
+    prompt-lookup (n-gram) drafting first; when every request gets a full
+    length-``K`` n-gram draft, skip the draft model for that step. Requires
+    ``method`` ``draft_model`` and ``prompt_lookup_min`` / ``prompt_lookup_max``."""
+
+    fly_mla_ngram_tokens: int | None = None
+    """Reserved for future hybrid n-gram prefix + draft-model suffix; currently
+    unused (full-``K`` n-gram fast path only)."""
+
+    fly_use_triton_entropy: bool = False
+    """Reserved hook for a fused Triton kernel (single pass logits to argmax +
+    entropy). Not implemented yet; keep ``False``. Run a profiler before
+    enabling any future implementation."""
 
     synthetic_acceptance_rate: float | None = None
     """Average acceptance rate for synthetic rejection sampling. Draft
@@ -207,6 +274,19 @@ class SpeculativeConfig:
         the final hidden states.
         """
         factors: list[Any] = []
+        if self.rejection_sample_method == "fly":
+            factors.append(self.fly_entropy_threshold)
+            factors.append(self.fly_defer_window)
+            factors.append(self.fly_entropy_mode)
+            if self.fly_entropy_mode == "top_k":
+                factors.append(self.fly_entropy_top_k)
+            factors.append(self.fly_use_triton_entropy)
+        if self.fly_mla:
+            factors.append(True)
+        if self.method == "ssd":
+            factors.append(self.ssd_async)
+            factors.append(self.ssd_jit_speculate)
+            factors.append(self.ssd_use_eagle)
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
         uses_aux_hidden_states = self.method in (
@@ -533,7 +613,7 @@ class SpeculativeConfig:
                             "one layer. Might need some code changes "
                             "to support multiple layers."
                         )
-                elif self.method == "draft_model":
+                elif self.method in ("draft_model", "ssd"):
                     pass
                 else:
                     raise NotImplementedError(
@@ -830,12 +910,33 @@ class SpeculativeConfig:
                 f"{self.method} is only supported for {aux_hidden_states_supported}"
                 f" models. Got {self.target_model_config.hf_text_config.model_type=}"
             )
+        if self.method == "ssd":
+            if self.ssd_fan_out_list is not None and self.ssd_fan_out_list_miss is not None:
+                if sum(self.ssd_fan_out_list) != sum(self.ssd_fan_out_list_miss):
+                    raise ValueError(
+                        "ssd_fan_out_list and ssd_fan_out_list_miss must have the same sum."
+                    )
+            if self.ssd_use_eagle:
+                logger.warning_once(
+                    "ssd_use_eagle is reserved; EAGLE + SSD is not wired in v1 yet.",
+                    scope="local",
+                )
         self.verify_equal_vocab_size_if_draft_model()
+        if self.fly_mla:
+            if self.method not in ("draft_model", "ssd"):
+                raise ValueError(
+                    "fly_mla requires speculative method 'draft_model' or 'ssd'."
+                )
+            if self.prompt_lookup_min is None or self.prompt_lookup_max is None:
+                raise ValueError(
+                    "fly_mla requires prompt_lookup_min and prompt_lookup_max "
+                    "for n-gram prompt lookup."
+                )
         return self
 
     def verify_equal_vocab_size_if_draft_model(self):
         if (
-            self.method == "draft_model"
+            self.method in ("draft_model", "ssd")
             and self.target_model_config is not None
             and self.draft_model_config is not None
         ):
@@ -873,7 +974,7 @@ class SpeculativeConfig:
         return self.method == "dflash"
 
     def uses_draft_model(self) -> bool:
-        return self.method == "draft_model"
+        return self.method in ("draft_model", "ssd")
 
     def uses_extract_hidden_states(self) -> bool:
         return self.method == "extract_hidden_states"

@@ -745,7 +745,7 @@ class VllmConfig:
                 if (
                     self.speculative_config.method not in get_args(EagleModelTypes)
                     and self.speculative_config.method not in get_args(NgramGPUTypes)
-                    and self.speculative_config.method != "draft_model"
+                    and self.speculative_config.method not in ("draft_model", "ssd")
                 ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "

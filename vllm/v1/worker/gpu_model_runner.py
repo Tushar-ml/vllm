@@ -164,6 +164,7 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
+from vllm.v1.spec_decode.ssd.proposer import SsdDraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
@@ -507,6 +508,7 @@ class GPUModelRunner(
         self.encoder_cudagraph_manager: EncoderCudaGraphManager | None = None
 
         self.use_aux_hidden_state_outputs = False
+        self._mla_ngram_proposer = None
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
@@ -519,6 +521,7 @@ class GPUModelRunner(
                 | EagleProposer
                 | DFlashProposer
                 | DraftModelProposer
+                | SsdDraftModelProposer
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
             )
@@ -526,6 +529,12 @@ class GPUModelRunner(
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "ssd":
+                self.drafter = SsdDraftModelProposer(
+                    vllm_config=self.vllm_config,
+                    device=self.device,
+                    runner=self,
+                )
             elif self.speculative_config.uses_draft_model():
                 self.drafter = DraftModelProposer(
                     vllm_config=self.vllm_config,
@@ -574,7 +583,16 @@ class GPUModelRunner(
                     "Unknown speculative decoding method: "
                     f"{self.speculative_config.method}"
                 )
-            self.rejection_sampler = RejectionSampler(self.sampler)
+            if (
+                self.speculative_config.uses_draft_model()
+                and self.speculative_config.fly_mla
+            ):
+                from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+
+                self._mla_ngram_proposer = NgramProposer(self.vllm_config)
+            self.rejection_sampler = RejectionSampler(
+                self.sampler, self.speculative_config
+            )
 
         self.num_spec_tokens = 0
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
@@ -4700,6 +4718,26 @@ class GPUModelRunner(
             else:
                 mm_embed_inputs = None
 
+            # Multi-level acceleration (FLy paper): full n-gram draft of length K
+            # avoids running the draft model when prompt lookup matches.
+            if (
+                spec_config.uses_draft_model()
+                and spec_config.fly_mla
+                and self._mla_ngram_proposer is not None
+                and not spec_config.disable_padded_drafter_batch
+            ):
+                assert isinstance(sampled_token_ids, torch.Tensor)
+                ngram_drafts = self._mla_ngram_proposer.propose(
+                    self._sampled_tensor_to_ngram_lists(sampled_token_ids),
+                    self.input_batch.num_tokens_no_spec,
+                    self.input_batch.token_ids_cpu,
+                )
+                K = spec_config.num_speculative_tokens
+                if ngram_drafts and all(len(row) == K for row in ngram_drafts):
+                    return torch.tensor(
+                        ngram_drafts, dtype=torch.int32, device=self.device
+                    )
+
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -5630,11 +5668,17 @@ class GPUModelRunner(
                 device=self.device,
                 dtype=logits.dtype,
             )
+            # FLy requires greedy sampling; the dummy sampler metadata uses
+            # all_greedy=False to warm the generic sampler path, but the
+            # rejection sampler must see greedy metadata or profile_run fails.
+            rejection_metadata = dummy_metadata
+            if self.speculative_config.rejection_sample_method == "fly":
+                rejection_metadata = replace(dummy_metadata, all_greedy=True)
             self.rejection_sampler(
                 dummy_spec_decode_metadata,
                 draft_probs,
                 logits,
-                dummy_metadata,
+                rejection_metadata,
             )
         return sampler_output
 
@@ -6966,6 +7010,18 @@ class GPUModelRunner(
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
+
+    def _sampled_tensor_to_ngram_lists(
+        self, sampled_token_ids: torch.Tensor
+    ) -> list[list[int]]:
+        """Convert padded sampler output rows to lists of valid token ids for
+        n-gram prompt lookup (negative entries are dropped)."""
+        out: list[list[int]] = []
+        for i in range(sampled_token_ids.shape[0]):
+            row = sampled_token_ids[i]
+            valid = row[row >= 0]
+            out.append(valid.cpu().tolist())
+        return out
 
     def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
         # This is a short term mitigation for issue mentioned in
