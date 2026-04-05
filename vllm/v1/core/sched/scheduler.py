@@ -101,6 +101,9 @@ class Scheduler(SchedulerInterface):
         )
         self.prev_step_scheduled_req_ids: set[str] = set()
 
+        sc = vllm_config.speculative_config
+        self._pearl_scheduling: bool = sc is not None and sc.pearl_scheduling
+
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = (
@@ -1066,6 +1069,9 @@ class Scheduler(SchedulerInterface):
         all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
+        pearl_pre_verify: list[bool] | None = (
+            [] if self._pearl_scheduling else None
+        )
         resumed_req_ids = set()
 
         num_running_reqs = len(running_reqs)
@@ -1101,6 +1107,8 @@ class Scheduler(SchedulerInterface):
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders
             )
+            if pearl_pre_verify is not None:
+                pearl_pre_verify.append(req.pearl_pre_verify)
 
         return CachedRequestData(
             req_ids=req_ids,
@@ -1110,6 +1118,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
+            pearl_pre_verify=pearl_pre_verify,
         )
 
     def _try_schedule_encoder_inputs(
@@ -1388,6 +1397,9 @@ class Scheduler(SchedulerInterface):
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
                 )
+                if self._pearl_scheduling:
+                    # PEARL: full accept -> post-verify (False); else pre-verify (True).
+                    request.pearl_pre_verify = num_accepted != num_draft_tokens
 
             stopped = False
             new_logprobs = None

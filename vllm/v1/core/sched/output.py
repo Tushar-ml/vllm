@@ -122,6 +122,8 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
+    # Parallel to req_ids: PEARL pre-verify flag when pearl_scheduling is enabled.
+    pearl_pre_verify: list[bool] | None = None
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
@@ -172,6 +174,7 @@ class CachedRequestData:
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
+            pearl_pre_verify=None,
         )
 
 

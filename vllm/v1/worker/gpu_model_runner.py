@@ -574,7 +574,9 @@ class GPUModelRunner(
                     "Unknown speculative decoding method: "
                     f"{self.speculative_config.method}"
                 )
-            self.rejection_sampler = RejectionSampler(self.sampler)
+            self.rejection_sampler = RejectionSampler(
+                self.sampler, self.speculative_config
+            )
 
         self.num_spec_tokens = 0
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
@@ -1254,6 +1256,9 @@ class GPUModelRunner(
 
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
+            pearl_pv = req_data.pearl_pre_verify
+            if pearl_pv is not None and i < len(pearl_pv):
+                req_state.pearl_pre_verify = pearl_pv[i]
 
             if not is_last_rank:
                 if not req_data.new_token_ids:
@@ -2592,6 +2597,7 @@ class GPUModelRunner(
         # Compute the logits indices.
         # [4, 1, 3, 1, 2]
         num_sampled_tokens = num_draft_tokens + 1
+        num_reqs = int(num_draft_tokens.shape[0])
 
         # Step 1.
         # cu_num_sampled_tokens: [4, 5, 8, 9, 11]
@@ -2644,6 +2650,18 @@ class GPUModelRunner(
         draft_token_ids = self.input_ids.gpu[logits_indices]
         draft_token_ids = draft_token_ids[target_logits_indices + 1]
 
+        pearl_pre_verify_t: torch.Tensor | None = None
+        if self.speculative_config is not None and self.speculative_config.pearl_scheduling:
+            flags = np.zeros(num_reqs, dtype=np.int32)
+            for req_idx in range(num_reqs):
+                if num_draft_tokens[req_idx] > 0:
+                    req_id = self.input_batch.req_ids[req_idx]
+                    if self.requests[req_id].pearl_pre_verify:
+                        flags[req_idx] = 1
+            pearl_pre_verify_t = torch.from_numpy(flags).to(
+                self.device, non_blocking=True
+            )
+
         return SpecDecodeMetadata(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens.tolist(),
@@ -2652,6 +2670,7 @@ class GPUModelRunner(
             target_logits_indices=target_logits_indices,
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,
+            pearl_pre_verify=pearl_pre_verify_t,
         )
 
     def _prepare_kv_sharing_fast_prefill(

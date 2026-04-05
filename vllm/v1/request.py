@@ -135,6 +135,10 @@ class Request:
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
 
+        # PEARL (draft-model speculative decoding): True = pre-verify mode,
+        # False = post-verify mode. Ignored unless speculative_config.pearl_scheduling.
+        self.pearl_pre_verify: bool = True
+
         # Multi-modal related
         self.mm_features = mm_features or []
 

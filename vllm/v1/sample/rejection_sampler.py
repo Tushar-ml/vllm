@@ -3,6 +3,7 @@
 
 from collections.abc import Sequence
 from dataclasses import replace
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -50,9 +51,14 @@ class RejectionSampler(nn.Module):
         output tokens = accepted tokens + recovered tokens + bonus tokens
     """
 
-    def __init__(self, sampler: Sampler):
+    def __init__(
+        self,
+        sampler: Sampler,
+        speculative_config: Any | None = None,
+    ):
         super().__init__()
         self.sampler = sampler
+        self.speculative_config = speculative_config
         logprobs_mode = self.sampler.logprobs_mode
         self.is_processed_logprobs_mode = logprobs_mode.startswith("processed")
         self.is_logits_logprobs_mode = logprobs_mode.endswith("logits")
@@ -138,16 +144,59 @@ class RejectionSampler(nn.Module):
             sampling_metadata,
         )
 
-        output_token_ids = rejection_sample(
-            metadata.draft_token_ids,
-            metadata.num_draft_tokens,
-            metadata.max_spec_len,
-            metadata.cu_num_draft_tokens,
-            draft_probs,
-            target_logits,
-            bonus_token_ids,
-            sampling_metadata,
+        use_pearl_greedy = (
+            metadata.pearl_pre_verify is not None
+            and self.speculative_config is not None
+            and getattr(self.speculative_config, "pearl_scheduling", False)
+            and sampling_metadata.all_greedy
         )
+        rejection_method = getattr(
+            self.speculative_config, "rejection_sample_method", "strict"
+        )
+        use_pearl_random = (
+            metadata.pearl_pre_verify is not None
+            and self.speculative_config is not None
+            and getattr(self.speculative_config, "pearl_scheduling", False)
+            and sampling_metadata.all_random
+            and (
+                draft_probs is None
+                or rejection_method == "probabilistic"
+            )
+        )
+        if use_pearl_greedy:
+            target_argmax = target_logits.argmax(dim=-1).to(torch.int32)
+            output_token_ids = pearl_greedy_rejection_sample(
+                metadata.draft_token_ids,
+                metadata.num_draft_tokens,
+                metadata.max_spec_len,
+                metadata.cu_num_draft_tokens,
+                target_argmax,
+                bonus_token_ids.reshape(-1).to(torch.int32),
+                metadata.pearl_pre_verify,
+            )
+        elif use_pearl_random:
+            output_token_ids = pearl_random_rejection_sample(
+                metadata.draft_token_ids,
+                metadata.num_draft_tokens,
+                metadata.max_spec_len,
+                metadata.cu_num_draft_tokens,
+                draft_probs,
+                target_logits,
+                bonus_token_ids,
+                metadata.pearl_pre_verify,
+                sampling_metadata,
+            )
+        else:
+            output_token_ids = rejection_sample(
+                metadata.draft_token_ids,
+                metadata.num_draft_tokens,
+                metadata.max_spec_len,
+                metadata.cu_num_draft_tokens,
+                draft_probs,
+                target_logits,
+                bonus_token_ids,
+                sampling_metadata,
+            )
 
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:
@@ -691,6 +740,196 @@ def rejection_greedy_sample_kernel(
             output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
             bonus_token_id,
         )
+
+
+# NOTE: PEARL (ICLR 2025) greedy pre-verify / post-verify scheduling.
+@triton.jit(do_not_specialize=["max_spec_len"])
+def pearl_greedy_rejection_sample_kernel(
+    output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
+    cu_num_draft_tokens_ptr,  # [batch_size]
+    draft_token_ids_ptr,  # [num_tokens]
+    target_argmax_ptr,  # [num_tokens]
+    bonus_token_ids_ptr,  # [batch_size]
+    pearl_pre_verify_ptr,  # [batch_size] int32 0/1
+    max_spec_len,
+):
+    req_idx = tl.program_id(0)
+    start_idx = 0 if req_idx == 0 else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
+    num_draft_tokens = end_idx - start_idx
+
+    if num_draft_tokens == 0:
+        return
+
+    is_pre = tl.load(pearl_pre_verify_ptr + req_idx)
+
+    if is_pre:
+        draft0 = tl.load(draft_token_ids_ptr + start_idx)
+        targ0 = tl.load(target_argmax_ptr + start_idx)
+        if draft0 == targ0:
+            for pos in range(num_draft_tokens):
+                d = tl.load(draft_token_ids_ptr + start_idx + pos)
+                tl.store(
+                    output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
+                    d,
+                )
+            bonus = tl.load(bonus_token_ids_ptr + req_idx)
+            tl.store(
+                output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
+                bonus,
+            )
+        else:
+            tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1), targ0)
+    else:
+        rejected = False
+        for pos in range(num_draft_tokens):
+            if not rejected:
+                draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+                target_argmax_id = tl.load(target_argmax_ptr + start_idx + pos)
+                tl.store(
+                    output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
+                    target_argmax_id,
+                )
+                if draft_token_id != target_argmax_id:
+                    rejected = True
+
+        if not rejected:
+            bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
+            tl.store(
+                output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
+                bonus_token_id,
+            )
+
+
+def pearl_greedy_rejection_sample(
+    draft_token_ids: torch.Tensor,
+    num_draft_tokens: list[int],
+    max_spec_len: int,
+    cu_num_draft_tokens: torch.Tensor,
+    target_argmax: torch.Tensor,
+    bonus_token_ids: torch.Tensor,
+    pearl_pre_verify: torch.Tensor,
+) -> torch.Tensor:
+    batch_size = len(num_draft_tokens)
+    device = target_argmax.device
+    output_token_ids = torch.full(
+        (batch_size, max_spec_len + 1),
+        -1,
+        dtype=torch.int32,
+        device=device,
+    )
+    pearl_greedy_rejection_sample_kernel[(batch_size,)](
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        target_argmax,
+        bonus_token_ids,
+        pearl_pre_verify,
+        max_spec_len,
+    )
+    return output_token_ids
+
+
+def pearl_random_rejection_sample(
+    draft_token_ids: torch.Tensor,
+    num_draft_tokens: list[int],
+    max_spec_len: int,
+    cu_num_draft_tokens: torch.Tensor,
+    draft_probs: torch.Tensor | None,
+    target_logits: torch.Tensor,
+    bonus_token_ids: torch.Tensor,
+    pearl_pre_verify: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+) -> torch.Tensor:
+    """PEARL acceptance for fully non-greedy (random) batches.
+
+    Pre-verify: ratio test on the first draft token only; accept all γ drafts +
+    bonus if it passes; otherwise one recovered token. Post-verify: standard
+    sequential rejection sampling over all draft positions.
+
+    When ``draft_probs`` is None, draft probability is treated as 1.0 at each
+    position (same convention as ``rejection_random_sample_kernel`` with
+    ``NO_DRAFT_PROBS``).
+    """
+    target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+    batch_size = len(num_draft_tokens)
+    device = target_logits.device
+    num_tokens = draft_token_ids.shape[0]
+
+    output_token_ids = torch.full(
+        (batch_size, max_spec_len + 1),
+        PLACEHOLDER_TOKEN_ID,
+        dtype=torch.int32,
+        device=device,
+    )
+
+    uniform_probs = generate_uniform_probs(
+        num_tokens,
+        num_draft_tokens,
+        sampling_metadata.generators,
+        device,
+    )
+
+    recovered_token_ids = sample_recovered_tokens(
+        max_spec_len,
+        num_draft_tokens,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        sampling_metadata,
+        device,
+    )
+
+    bonus_flat = bonus_token_ids.reshape(-1).to(torch.int32)
+
+    for req_idx in range(batch_size):
+        start = 0 if req_idx == 0 else int(cu_num_draft_tokens[req_idx - 1].item())
+        end = int(cu_num_draft_tokens[req_idx].item())
+        k = end - start
+        if k == 0:
+            continue
+
+        is_pre = int(pearl_pre_verify[req_idx].item()) != 0
+
+        if is_pre:
+            d0 = int(draft_token_ids[start].item())
+            u = float(uniform_probs[start].item())
+            pt = float(target_probs[start, d0].item())
+            if draft_probs is not None:
+                pd = float(draft_probs[start, d0].item())
+            else:
+                pd = 1.0
+            if pd > 0.0 and pt / pd >= u:
+                output_token_ids[req_idx, :k] = draft_token_ids[start:end].to(
+                    torch.int32
+                )
+                output_token_ids[req_idx, k] = bonus_flat[req_idx]
+            else:
+                output_token_ids[req_idx, 0] = int(recovered_token_ids[start].item())
+        else:
+            rejected = False
+            for i in range(k):
+                pos = start + i
+                dt = int(draft_token_ids[pos].item())
+                if draft_probs is not None:
+                    pd = float(draft_probs[pos, dt].item())
+                else:
+                    pd = 1.0
+                pt = float(target_probs[pos, dt].item())
+                u = float(uniform_probs[pos].item())
+                if not rejected:
+                    if pd > 0.0 and pt / pd >= u:
+                        output_token_ids[req_idx, i] = dt
+                    else:
+                        rejected = True
+                        output_token_ids[req_idx, i] = int(
+                            recovered_token_ids[pos].item()
+                        )
+            if not rejected:
+                output_token_ids[req_idx, k] = bonus_flat[req_idx]
+
+    return output_token_ids
 
 
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
