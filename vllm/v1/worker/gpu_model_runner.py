@@ -164,6 +164,7 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
+from vllm.v1.spec_decode.ssd.proposer import SsdDraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
@@ -520,6 +521,7 @@ class GPUModelRunner(
                 | EagleProposer
                 | DFlashProposer
                 | DraftModelProposer
+                | SsdDraftModelProposer
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
             )
@@ -527,6 +529,12 @@ class GPUModelRunner(
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "ssd":
+                self.drafter = SsdDraftModelProposer(
+                    vllm_config=self.vllm_config,
+                    device=self.device,
+                    runner=self,
+                )
             elif self.speculative_config.uses_draft_model():
                 self.drafter = DraftModelProposer(
                     vllm_config=self.vllm_config,
