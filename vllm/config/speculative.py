@@ -62,6 +62,7 @@ SpeculativeMethod = Literal[
     NgramGPUTypes,
 ]
 RejectionSampleMethod = Literal["strict", "probabilistic", "synthetic", "fly"]
+FlyEntropyMode = Literal["full", "top_k"]
 
 
 @config
@@ -198,6 +199,26 @@ class SpeculativeConfig:
     """Lookahead window size :math:`W` for FLy deferred mismatch decisions
     (``rejection_sample_method`` ``fly``)."""
 
+    fly_entropy_mode: FlyEntropyMode = "full"
+    """How to compute normalized entropy for FLy. ``full`` matches the paper
+    (softmax over the full vocabulary). ``top_k`` approximates entropy using
+    only the top-``fly_entropy_top_k`` logits per position (faster). Argmax
+    for the gate always uses full logits."""
+
+    fly_entropy_top_k: int = Field(default=1024, ge=2)
+    """When ``fly_entropy_mode`` is ``top_k``, number of largest logits per
+    position used for entropy approximation."""
+
+    fly_mla: bool = False
+    """Multi-level acceleration for draft-model speculative decoding: try
+    prompt-lookup (n-gram) drafting first; when every request gets a full
+    length-``K`` n-gram draft, skip the draft model for that step. Requires
+    ``method`` ``draft_model`` and ``prompt_lookup_min`` / ``prompt_lookup_max``."""
+
+    fly_mla_ngram_tokens: int | None = None
+    """Reserved for future hybrid n-gram prefix + draft-model suffix; currently
+    unused (full-``K`` n-gram fast path only)."""
+
     synthetic_acceptance_rate: float | None = None
     """Average acceptance rate for synthetic rejection sampling. Draft
     tokens are accepted with a position-dependent probability that decays
@@ -221,6 +242,11 @@ class SpeculativeConfig:
         if self.rejection_sample_method == "fly":
             factors.append(self.fly_entropy_threshold)
             factors.append(self.fly_defer_window)
+            factors.append(self.fly_entropy_mode)
+            if self.fly_entropy_mode == "top_k":
+                factors.append(self.fly_entropy_top_k)
+        if self.fly_mla:
+            factors.append(True)
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
         uses_aux_hidden_states = self.method in (
@@ -845,6 +871,14 @@ class SpeculativeConfig:
                 f" models. Got {self.target_model_config.hf_text_config.model_type=}"
             )
         self.verify_equal_vocab_size_if_draft_model()
+        if self.fly_mla:
+            if self.method != "draft_model":
+                raise ValueError("fly_mla requires speculative method 'draft_model'.")
+            if self.prompt_lookup_min is None or self.prompt_lookup_max is None:
+                raise ValueError(
+                    "fly_mla requires prompt_lookup_min and prompt_lookup_max "
+                    "for n-gram prompt lookup."
+                )
         return self
 
     def verify_equal_vocab_size_if_draft_model(self):

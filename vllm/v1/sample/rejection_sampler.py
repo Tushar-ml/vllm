@@ -368,6 +368,77 @@ class RejectionSampler(nn.Module):
         return result
 
 
+def _fly_h_norm_full_vocab(logits: torch.Tensor) -> torch.Tensor:
+    """Normalized entropy h in [0, 1] per row (paper Eq. 5)."""
+    vocab_size = logits.shape[-1]
+    log_vocab = math.log(float(vocab_size))
+    target_probs = torch.softmax(logits.to(torch.float32), dim=-1)
+    clamped = target_probs.clamp(min=1e-20)
+    entropy = -(target_probs * torch.log(clamped)).sum(dim=-1)
+    return entropy / log_vocab
+
+
+def _fly_h_norm_top_k(logits: torch.Tensor, top_k: int) -> torch.Tensor:
+    """Approximate normalized entropy using softmax only over the top-k logits.
+
+    A fused Triton kernel (top-k + softmax + entropy) may be added later if
+    profiling shows this path is hot; keep ``full`` as the reference.
+    """
+    vocab_size = logits.shape[-1]
+    k = min(int(top_k), vocab_size)
+    vals, _ = torch.topk(logits, k, dim=-1)
+    sub = torch.softmax(vals.to(torch.float32), dim=-1)
+    clamped = sub.clamp(min=1e-20)
+    entropy = -(sub * torch.log(clamped)).sum(dim=-1)
+    log_k = math.log(float(k))
+    return entropy / log_k
+
+
+def _fly_compute_h_norm(
+    logits: torch.Tensor,
+    entropy_mode: str,
+    entropy_top_k: int,
+) -> torch.Tensor:
+    if entropy_mode == "full":
+        return _fly_h_norm_full_vocab(logits)
+    if entropy_mode == "top_k":
+        return _fly_h_norm_top_k(logits, entropy_top_k)
+    raise ValueError(f"Unknown fly entropy mode: {entropy_mode}")
+
+
+def _fly_compute_stop_indices(
+    delta: torch.Tensor,
+    h: torch.Tensor,
+    theta: float,
+    K: int,
+    W: int,
+) -> tuple[int, int]:
+    """Return (s_gate, s_defer) as 1-based paper indices (K+1 means no stop)."""
+    # s_gate: earliest strict mismatch (low entropy at mismatch)
+    strict = (~delta) & (h < theta)
+    if bool(strict.any().item()):
+        first = int(torch.nonzero(strict, as_tuple=False)[0, 0].item())
+        s_gate = first + 1
+    else:
+        s_gate = K + 1
+
+    s_defer = K + 1
+    for j in range(K):
+        if bool(delta[j].item()):
+            continue
+        hj = h[j]
+        if bool((hj < theta).item()):
+            continue
+        if j + W > K - 1:
+            s_defer = min(s_defer, j + 1)
+        else:
+            seg = delta[j + 1 : j + W + 1]
+            if bool((~seg).any().item()):
+                s_defer = min(s_defer, j + 1)
+
+    return s_gate, s_defer
+
+
 def fly_greedy_rejection_sample(
     output_token_ids: torch.Tensor,
     draft_token_ids: torch.Tensor,
@@ -377,17 +448,13 @@ def fly_greedy_rejection_sample(
     bonus_token_ids: torch.Tensor,
     theta: float,
     defer_window: int,
+    entropy_mode: str = "full",
+    entropy_top_k: int = 1024,
 ) -> None:
     """Training-Free Loosely Speculative Decoding (FLy) verification for greedy
     sampling. Fills ``output_token_ids`` in place; see arXiv:2511.22972."""
     batch_size = len(num_draft_tokens)
-    vocab_size = target_logits.shape[-1]
-    log_vocab = math.log(float(vocab_size))
-
-    target_probs = torch.softmax(target_logits.to(torch.float32), dim=-1)
-    clamped = target_probs.clamp(min=1e-20)
-    entropy = -(target_probs * torch.log(clamped)).sum(dim=-1)
-    h_norm = entropy / log_vocab
+    h_norm = _fly_compute_h_norm(target_logits, entropy_mode, entropy_top_k)
     target_argmax = target_logits.argmax(dim=-1)
 
     start_idx = 0
@@ -407,48 +474,19 @@ def fly_greedy_rejection_sample(
         h = h_norm[start_idx:end_idx]
         delta = d == ta
 
-        # Paper uses 1-based indices for s_gate / s_defer / s_FLY; we use the
-        # same numeric values (1..K for draft positions, K+1 means full accept).
-        s_gate = K + 1
-        s_defer = K + 1
-        W = defer_window
-
-        for j in range(K):
-            if bool(delta[j].item()):
-                continue
-            hj = float(h[j].item())
-            if hj < theta:
-                s_gate = min(s_gate, j + 1)
-            else:
-                if j + W > K - 1:
-                    defer_reject = True
-                else:
-                    nw = 0
-                    for t in range(j + 1, j + W + 1):
-                        if t >= K:
-                            break
-                        if not bool(delta[t].item()):
-                            nw += 1
-                    defer_reject = nw > 0
-                if defer_reject:
-                    s_defer = min(s_defer, j + 1)
-
+        s_gate, s_defer = _fly_compute_stop_indices(
+            delta, h, theta, K, defer_window
+        )
         s_fly = min(s_gate, s_defer)
 
         if s_fly == K + 1:
-            for i in range(K):
-                if bool(delta[i].item()):
-                    row[i] = ta[i].to(torch.int32)
-                else:
-                    row[i] = d[i].to(torch.int32)
+            row[:K] = torch.where(delta, ta, d).to(torch.int32)
             row[K] = int(bonus_id)
         else:
             stop = s_fly
-            for i in range(stop - 1):
-                if bool(delta[i].item()):
-                    row[i] = ta[i].to(torch.int32)
-                else:
-                    row[i] = d[i].to(torch.int32)
+            row[: stop - 1] = torch.where(
+                delta[: stop - 1], ta[: stop - 1], d[: stop - 1]
+            ).to(torch.int32)
             row[stop - 1] = ta[stop - 1].to(torch.int32)
 
         start_idx = end_idx
@@ -518,6 +556,8 @@ def rejection_sample(
                 bonus_token_ids,
                 speculative_config.fly_entropy_threshold,
                 speculative_config.fly_defer_window,
+                entropy_mode=speculative_config.fly_entropy_mode,
+                entropy_top_k=speculative_config.fly_entropy_top_k,
             )
         else:
             target_argmax = target_logits.argmax(dim=-1)

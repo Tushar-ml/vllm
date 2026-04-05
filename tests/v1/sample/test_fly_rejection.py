@@ -10,6 +10,8 @@ from vllm.platforms import current_platform
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
+    _fly_h_norm_full_vocab,
+    _fly_h_norm_top_k,
     fly_greedy_rejection_sample,
     rejection_sample,
 )
@@ -166,6 +168,8 @@ def test_rejection_sample_fly_end_to_end():
         rejection_sample_method="fly",
         fly_entropy_threshold=0.3,
         fly_defer_window=2,
+        fly_entropy_mode="full",
+        fly_entropy_top_k=1024,
     )
     out = rejection_sample(
         draft,
@@ -180,4 +184,53 @@ def test_rejection_sample_fly_end_to_end():
     )
     assert int(out[0, 0].item()) == 3
     assert int(out[0, 3].item()) == 99
+
+
+def test_top_k_entropy_matches_full_when_k_covers_vocab():
+    logits = torch.randn(6, 64, device=DEVICE)
+    hf = _fly_h_norm_full_vocab(logits)
+    ht = _fly_h_norm_top_k(logits, 64)
+    assert torch.allclose(hf, ht, rtol=1e-4, atol=1e-4)
+
+
+def test_fly_loose_accept_top_k_mode_agrees_with_full():
+    """With V=4, top_k=4 matches full entropy; FLy output should match."""
+    K = 3
+    W = 2
+    draft = torch.tensor([3, 1, 2], dtype=torch.int32, device=DEVICE)
+    logits = torch.zeros((K, 4), device=DEVICE)
+    logits[1, 1] = 10.0
+    logits[2, 2] = 10.0
+
+    out_full = torch.full(
+        (1, K + 1), PLACEHOLDER_TOKEN_ID, dtype=torch.int32, device=DEVICE
+    )
+    out_topk = torch.full(
+        (1, K + 1), PLACEHOLDER_TOKEN_ID, dtype=torch.int32, device=DEVICE
+    )
+    bonus = torch.tensor([[42]], dtype=torch.int32, device=DEVICE)
+    fly_greedy_rejection_sample(
+        out_full,
+        draft,
+        [K],
+        K,
+        logits,
+        bonus,
+        theta=0.3,
+        defer_window=W,
+        entropy_mode="full",
+    )
+    fly_greedy_rejection_sample(
+        out_topk,
+        draft,
+        [K],
+        K,
+        logits,
+        bonus,
+        theta=0.3,
+        defer_window=W,
+        entropy_mode="top_k",
+        entropy_top_k=4,
+    )
+    assert torch.equal(out_full, out_topk)
 
