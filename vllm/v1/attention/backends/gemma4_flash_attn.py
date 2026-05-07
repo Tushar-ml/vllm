@@ -18,7 +18,7 @@ class Gemma4FlashAttentionBackend(FlashAttentionBackend):
     @classmethod
     def supports_mm_prefix(cls) -> bool:
         # Native MM-prefix masking is handled via hybrid fallback routing.
-        return False
+        return True
 
     @staticmethod
     def get_name() -> str:
