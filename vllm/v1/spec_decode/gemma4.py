@@ -81,11 +81,15 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         """
         per_group_attn_metadata: list[object] = []
         per_layer_attn_metadata: dict[str, object] = {}
+        num_reqs = common_attn_metadata.num_reqs
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
             if gid in self._per_group_block_tables:
                 cm = copy(common_attn_metadata)
-                cm.block_table_tensor = self._per_group_block_tables[gid]
+                # Slice the block table to match num_reqs from the
+                # (possibly unpadded) common_attn_metadata so that FA3
+                # sees batch_size == batch_size_k.
+                cm.block_table_tensor = self._per_group_block_tables[gid][:num_reqs]
             else:
                 cm = common_attn_metadata
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
