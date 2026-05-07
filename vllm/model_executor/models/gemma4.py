@@ -64,6 +64,9 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
+from vllm.v1.attention.backends.gemma4_flash_attn import (
+    Gemma4FlashAttentionBackend,
+)
 
 from .interfaces import (
     EagleModelMixin,
@@ -501,6 +504,9 @@ class Gemma4Attention(nn.Module):
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            attn_backend=Gemma4FlashAttentionBackend,
+            apply_v_norm=not self.is_kv_shared_layer,
+            v_norm_eps=config.rms_norm_eps,
             prefix=f"{prefix}.attn",
         )
 
@@ -527,10 +533,6 @@ class Gemma4Attention(nn.Module):
             k = self.k_norm(k)
             k = k.flatten(-2, -1)
             q, k = self.rotary_emb(positions, q, k)
-
-            v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
-            v = self.v_norm(v)
-            v = v.flatten(-2, -1)
         else:
             # Shared: only apply RoPE to Q
             q = self.rotary_emb(positions, q, k)[0]
