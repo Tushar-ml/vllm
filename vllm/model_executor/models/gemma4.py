@@ -495,11 +495,9 @@ class Gemma4Attention(nn.Module):
             is_neox_style=True,
         )
 
-        # Heterogeneous Gemma4 forces TRITON_ATTN globally (see Gemma4Config).
-        # Every attention layer must use that backend so KV cache layout matches
-        # across sliding vs full-attention layers and draft MTP KV sharing.
-        # Gemma4 FA is only used when the user (or autoselect) picks a non-Triton
-        # attention backend explicitly.
+        # Heterogeneous Gemma4 may force TRITON_ATTN when no backend is set
+        # (see Gemma4Config). Use Gemma4FlashAttentionBackend when the user
+        # explicitly selects a Flash backend that supports max_head_dim (e.g. H100).
         vllm_config = get_current_vllm_config()
         forced_backend = vllm_config.attention_config.backend
         if forced_backend in (None, AttentionBackendEnum.TRITON_ATTN):

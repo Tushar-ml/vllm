@@ -220,9 +220,7 @@ class Gemma4MTPAttention(nn.Module):
 
         # kv_sharing_target_layer_name is set after model construction
         # by Gemma4Proposer._setup_gemma4_kv_sharing().
-        # Match Gemma4Attention backend selection so KV cache layout agrees with
-        # the target model (TRITON for heterogeneous Gemma4 defaults; Gemma4 FA
-        # only when the user forces a non-Triton attention backend).
+        # Match Gemma4Attention backend selection (see Gemma4Config).
         vllm_config = get_current_vllm_config()
         forced_backend = vllm_config.attention_config.backend
         if forced_backend in (None, AttentionBackendEnum.TRITON_ATTN):
