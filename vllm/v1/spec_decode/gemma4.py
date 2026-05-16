@@ -144,13 +144,11 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
-        """Preserve the target's forced TRITON_ATTN backend for draft layers.
+        """Reuse the target's attention backend for draft layers.
 
-        Gemma4 forces TRITON_ATTN due to heterogeneous head dimensions
-        (head_dim=256 sliding, global_head_dim=512 full). The base class
-        resets attention_config.backend to None for draft models, causing
-        sliding layers to fall back to FLASH_ATTN which cannot handle
-        KV-shared cache. Override to carry the target's backend through.
+        The base class clears attention_config.backend for draft models; Gemma4
+        MTP layers KV-share with the target and must use the same backend
+        so KV cache layout is consistent.
         """
         base = super()._create_draft_vllm_config()
         target_backend = self.vllm_config.attention_config.backend

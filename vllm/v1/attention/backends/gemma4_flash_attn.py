@@ -43,9 +43,6 @@ class Gemma4FlashAttentionImpl(FlashAttentionImpl):
         attn_type=None,
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
-        *,
-        apply_v_norm: bool = True,
-        v_norm_eps: float = 1e-6,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -62,12 +59,6 @@ class Gemma4FlashAttentionImpl(FlashAttentionImpl):
             sinks=sinks,
             **kwargs,
         )
-        self.apply_v_norm = apply_v_norm
-        self.v_norm_eps = v_norm_eps
-
-    def _rms_norm_no_weight(self, x: torch.Tensor) -> torch.Tensor:
-        inv_rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.v_norm_eps)
-        return x * inv_rms
 
     def forward(
         self,
@@ -105,8 +96,7 @@ class Gemma4FlashAttentionImpl(FlashAttentionImpl):
             return
 
         key_cache, value_cache = kv_cache.unbind(0)
-        if self.apply_v_norm:
-            value = self._rms_norm_no_weight(value)
+        # V RMS norm is applied in Gemma4Attention.forward before attention.
 
         reshape_and_cache_flash(
             key,

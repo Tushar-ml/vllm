@@ -70,12 +70,11 @@ class Gemma4Config(VerifyAndUpdateConfig):
 
         The fix detects heterogeneous head dimensions from the model config
         and forces TRITON_ATTN (which has no head_size ceiling) for all
-        layers when the user hasn't explicitly chosen a backend.
-
-        TODO: Heterogeneous head_sizes (head_dim != global_head_dim)
-        require NixlConnector changes to support per-layer KV transfer
-        with different head dimensions for prefill-decode disaggregation.
+        layers when the user hasn't explicitly chosen a backend, or when the
+        user chose FLASH_ATTN / GEMMA4_FLASH_ATTN but the active FlashAttention
+        build cannot support the largest head dimension (e.g. FA2 only).
         """
+
         hf_text_config = vllm_config.model_config.hf_text_config
         head_dim = getattr(hf_text_config, "head_dim", None)
         global_head_dim = getattr(hf_text_config, "global_head_dim", None)
@@ -86,18 +85,42 @@ class Gemma4Config(VerifyAndUpdateConfig):
         # the config carries global_head_dim but all layers can still use
         # the same FA backend.
         max_head_dim = max(head_dim or 0, global_head_dim or 0)
-        if (
+        if not (
             head_dim is not None
             and global_head_dim is not None
             and head_dim != global_head_dim
             and max_head_dim > 256
-            and vllm_config.attention_config.backend is None
         ):
-            from vllm.v1.attention.backends.registry import (
-                AttentionBackendEnum,
-            )
+            return
 
-            vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        user_backend = vllm_config.attention_config.backend
+        flash_backends = frozenset(
+            {
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.GEMMA4_FLASH_ATTN,
+            }
+        )
+        needs_triton = user_backend is None or (
+            user_backend in flash_backends
+            and not FlashAttentionBackend.supports_head_size(max_head_dim)
+        )
+        if not needs_triton:
+            return
+
+        if user_backend is not None and user_backend != AttentionBackendEnum.TRITON_ATTN:
+            logger.warning(
+                "Gemma4 has heterogeneous head dimensions "
+                "(head_dim=%d, global_head_dim=%d). The requested attention "
+                "backend cannot run full-attention layers with head_size=%d "
+                "on this FlashAttention build; using TRITON_ATTN for all layers.",
+                head_dim,
+                global_head_dim,
+                max_head_dim,
+            )
+        else:
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
                 "(head_dim=%d, global_head_dim=%d). Forcing TRITON_ATTN "
@@ -105,6 +128,8 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 head_dim,
                 global_head_dim,
             )
+
+        vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
 
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):

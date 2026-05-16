@@ -808,3 +808,19 @@ def test_non_causal_backend_correctness(
             causal=False,
             block_size=128,
         )
+
+
+def test_flash_attn_supports_head_size_matches_runtime_fa_version():
+    """Head sizes >256 should follow get_flash_attn_version fallbacks (e.g. FA4->2)."""
+    from unittest.mock import patch
+
+    from vllm.v1.attention.backends import flash_attn as fa_mod
+
+    with patch.object(fa_mod, "get_flash_attn_version", return_value=2):
+        assert not fa_mod.FlashAttentionBackend.supports_head_size(512)
+    with patch.object(fa_mod, "get_flash_attn_version", return_value=3):
+        assert not fa_mod.FlashAttentionBackend.supports_head_size(512)
+    with patch.object(fa_mod, "get_flash_attn_version", return_value=4):
+        assert fa_mod.FlashAttentionBackend.supports_head_size(512)
+    with patch.object(fa_mod, "get_flash_attn_version", return_value=None):
+        assert not fa_mod.FlashAttentionBackend.supports_head_size(512)
