@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 # Role label that Gemma4 emits at the start of the thinking channel.
 # The model generates: <|channel>thought\n...reasoning...<channel|>
+# Some streams omit <|channel> but still emit thought\n...<channel|>.
 # This prefix must be stripped to expose only the actual reasoning content.
 _THOUGHT_PREFIX = "thought\n"
 
@@ -30,9 +31,15 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
     system turn containing <|think|> (token 98) to trigger chain-of-thought
     reasoning.
 
-    Output pattern when thinking is enabled::
+    Output patterns when thinking is enabled::
 
         <|channel>thought
+        ...chain of thought reasoning...<channel|>
+        Final answer text here.
+
+    or (when the start delimiter is absent from the stream)::
+
+        thought
         ...chain of thought reasoning...<channel|>
         Final answer text here.
 
@@ -147,14 +154,31 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         making it impossible to separate pre-reasoning content from
         reasoning content via string matching.
         """
-        result = super().extract_reasoning_streaming(
-            previous_text,
-            current_text,
-            delta_text,
-            previous_token_ids,
-            current_token_ids,
-            delta_token_ids,
+        seen_start = (
+            self.start_token_id in previous_token_ids
+            or self.start_token_id in delta_token_ids
         )
+        if seen_start:
+            result = super().extract_reasoning_streaming(
+                previous_text,
+                current_text,
+                delta_text,
+                previous_token_ids,
+                current_token_ids,
+                delta_token_ids,
+            )
+        else:
+            # Some outputs omit <|channel> but still use thought\n...<channel|>
+            # (e.g. when the start delimiter is stripped). Route pre-end text
+            # through the reasoning path, matching gemma4_utils.parse_thinking_output.
+            result = self._extract_reasoning_streaming_without_start(
+                previous_text,
+                current_text,
+                delta_text,
+                previous_token_ids,
+                current_token_ids,
+                delta_token_ids,
+            )
         if result is None:
             return None
 
@@ -212,6 +236,31 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         self._prefix_stripped = True
         result.reasoning = self._reasoning_text
         return result
+
+    def _extract_reasoning_streaming_without_start(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+    ) -> DeltaMessage | None:
+        """Stream reasoning when only ``<channel|>`` is present (no ``<|channel>``)."""
+        if len(delta_token_ids) == 1 and delta_token_ids[0] == self.end_token_id:
+            return None
+
+        if self.end_token_id in delta_token_ids:
+            end_index = delta_text.find(self.end_token)
+            reasoning = delta_text[:end_index]
+            content = delta_text[end_index + len(self.end_token) :]
+            return DeltaMessage(
+                reasoning=reasoning if reasoning else None,
+                content=content if content else None,
+            )
+        if self.end_token_id in previous_token_ids:
+            return DeltaMessage(content=delta_text)
+        return DeltaMessage(reasoning=delta_text)
 
 
 def _strip_thought_label(text: str) -> str:

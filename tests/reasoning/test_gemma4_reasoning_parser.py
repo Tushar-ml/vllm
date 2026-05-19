@@ -28,8 +28,8 @@ INVALID_SIMPLE_NONSTREAMING = {
 }
 INVALID_SIMPLE_STREAMING = {
     "output": "This is a reasoning section<channel|>This is the rest",
-    "reasoning": None,
-    "content": "This is a reasoning sectionThis is the rest",
+    "reasoning": "This is a reasoning section",
+    "content": "This is the rest",
     "is_reasoning_end": True,
 }
 INVALID_COMPLETE_NONSTREAMING = {
@@ -40,8 +40,8 @@ INVALID_COMPLETE_NONSTREAMING = {
 }
 INVALID_COMPLETE_STREAMING = {
     "output": "This is a reasoning section<channel|>",
-    "reasoning": None,
-    "content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
+    "content": None,
     "is_reasoning_end": True,
 }
 NO_CONTENT = {
@@ -128,6 +128,19 @@ THOUGHT_PREFIX_DIVERGE = {
     "content": "Done",
     "is_reasoning_end": True,
 }
+# <|channel> omitted; only thought\n and <channel|> delimit reasoning.
+THOUGHT_PREFIX_NO_START = {
+    "output": "thought\nActual reasoning here<channel|>Final answer",
+    "reasoning": "Actual reasoning here",
+    "content": "Final answer",
+    "is_reasoning_end": True,
+}
+THOUGHT_PREFIX_NO_START_ONLY = {
+    "output": "thought\n<channel|>",
+    "reasoning": "",
+    "content": None,
+    "is_reasoning_end": True,
+}
 # The model isn't reasoning if we're generating tool calls.
 TOOL_CALL_STARTED = {
     "output": "<|tool_call>",
@@ -166,6 +179,12 @@ TEST_CASES = [
     ),
     pytest.param(False, THOUGHT_PREFIX_DIVERGE, id="thought_prefix_diverge"),
     pytest.param(True, THOUGHT_PREFIX_DIVERGE, id="thought_prefix_diverge_streaming"),
+    pytest.param(False, THOUGHT_PREFIX_NO_START, id="thought_prefix_no_start"),
+    pytest.param(True, THOUGHT_PREFIX_NO_START, id="thought_prefix_no_start_streaming"),
+    pytest.param(False, THOUGHT_PREFIX_NO_START_ONLY, id="thought_prefix_no_start_only"),
+    pytest.param(
+        True, THOUGHT_PREFIX_NO_START_ONLY, id="thought_prefix_no_start_only_streaming"
+    ),
     pytest.param(False, TOOL_CALL_STARTED, id="tool_call_started"),
     pytest.param(True, TOOL_CALL_STARTED, id="tool_call_started_streaming"),
 ]
