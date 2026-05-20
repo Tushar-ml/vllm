@@ -25,6 +25,50 @@ _TH_PAIR = _TH_WORD * 2
 _LEN_PAIR = len(_TH_PAIR)
 
 
+def _compact_cf_no_ws(core: str, cf_core: str | None = None) -> str:
+    """Fold case and drop **all** whitespace (matches ``str.isspace()`` semantics via split)."""
+    if cf_core is None:
+        cf_core = core.casefold()
+    return "".join(cf_core.split())
+
+
+def _strip_one_thought_shard_line(core: str, nl: str, *, cf_core: str | None = None) -> str:
+    compact = _compact_cf_no_ws(core, cf_core)
+    if not compact:
+        return core + nl
+
+    limit = len(compact)
+    i = 0
+    while i + _LEN_PAIR <= limit and compact.startswith(_TH_PAIR, i):
+        i += _LEN_PAIR
+    c = compact[i:]
+    lc = len(c)
+
+    if lc == 0:
+        return nl
+
+    if c == _TH_WORD:
+        return nl
+
+    if lc < _LEN_TH:
+        return nl if _TH_WORD.startswith(c) else core + nl
+
+    if lc <= 5 and _TH_WORD.endswith(c) and c != _TH_WORD:
+        return core + nl
+
+    tail = c[_LEN_TH:]
+    if (
+        lc > _LEN_TH
+        and tail
+        and tail != _TH_WORD
+        and c.startswith(_TH_WORD)
+        and _TH_WORD.startswith(tail)
+    ):
+        return nl
+
+    return core + nl
+
+
 def strip_thought_shard_echoes(text: str) -> str:
     """Strip glued ``thought`` shards (sometimes truncated mid-token at stream cut).
 
@@ -35,8 +79,15 @@ def strip_thought_shard_echoes(text: str) -> str:
     ``thoughtthoughtful`` remains untouched (after removing pairs the shard ``ful``
     is a suffix of the English word ``thoughtful``, not ``thought`` garbage).
     """
-    if not text or "thought" not in text.casefold():
+    if not text:
         return text
+    cf_full = text.casefold()
+    if "thought" not in cf_full:
+        return text
+
+    # Hot path: streaming deltas are usually single-line — avoid splitlines copies.
+    if "\n" not in text and "\r" not in text:
+        return _strip_one_thought_shard_line(text, "", cf_core=cf_full)
 
     rebuilt: list[str] = []
     for raw_line in text.splitlines(keepends=True):
@@ -46,47 +97,7 @@ def strip_thought_shard_echoes(text: str) -> str:
             nl = "\n"
             core = raw_line[:-1]
 
-        compact = "".join(ch for ch in core.casefold() if not ch.isspace())
-        if not compact:
-            rebuilt.append(raw_line)
-            continue
-
-        c = compact
-        while c.startswith(_TH_PAIR):
-            c = c[_LEN_PAIR:]
-
-        if not c:
-            rebuilt.append(nl)
-            continue
-
-        if c == _TH_WORD:
-            rebuilt.append(nl)
-            continue
-
-        if len(c) < _LEN_TH and _TH_WORD.startswith(c):
-            rebuilt.append(nl)
-            continue
-
-        if len(c) <= 5 and _TH_WORD.endswith(c) and c != _TH_WORD:
-            rebuilt.append(core + nl)
-            continue
-
-        # ``thought`` + truncated continuation from streaming cut (e.g. ``thoughttho``).
-        if (
-            len(c) > _LEN_TH
-            and c.startswith(_TH_WORD)
-            and _TH_WORD.startswith(c[_LEN_TH:])
-            and c[_LEN_TH:] != _TH_WORD
-        ):
-            rebuilt.append(nl)
-            continue
-
-        # Leading ``thought`` glued to normal text (not a continuation shard).
-        if c.startswith(_TH_WORD):
-            rebuilt.append(core + nl)
-            continue
-
-        rebuilt.append(core + nl)
+        rebuilt.append(_strip_one_thought_shard_line(core, nl))
 
     return "".join(rebuilt)
 
