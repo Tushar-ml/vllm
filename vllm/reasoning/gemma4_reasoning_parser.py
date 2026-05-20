@@ -36,9 +36,10 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         self.new_turn_token_id = self.vocab["<|turn>"]
         self.tool_call_token_id = self.vocab["<|tool_call>"]
         self.tool_response_token_id = self.vocab["<|tool_response>"]
-        # Streaming cache: previous safe prefix → last parse snapshot.
+        # Streaming cache (valid only while previous_text == last current_text).
         self._stream_safe_prev: str | None = None
         self._stream_prev_snapshot: tuple[str | None, str | None] | None = None
+        self._last_current_text: str | None = None
 
     def adjust_request(
         self, request: "ChatCompletionRequest | ResponsesRequest"
@@ -94,12 +95,18 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         del delta_text, previous_token_ids, current_token_ids, delta_token_ids
 
         safe_curr = strip_trailing_incomplete_token(current_text)
-        if self._stream_safe_prev is not None and safe_curr == self._stream_safe_prev:
+        # Only reuse cache for the same stream (not another choice / request).
+        same_stream = (
+            self._last_current_text is not None
+            and previous_text == self._last_current_text
+        )
+        if same_stream and safe_curr == self._stream_safe_prev:
             return None
 
         safe_prev = strip_trailing_incomplete_token(previous_text)
         if (
-            self._stream_safe_prev is not None
+            same_stream
+            and self._stream_safe_prev is not None
             and safe_prev == self._stream_safe_prev
             and self._stream_prev_snapshot is not None
         ):
@@ -110,6 +117,7 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         curr_snapshot = extract_reasoning_non_streaming(safe_curr)
         self._stream_safe_prev = safe_curr
         self._stream_prev_snapshot = curr_snapshot
+        self._last_current_text = current_text
 
         dr, dc = diff_reasoning_streaming_snapshots(curr_snapshot, prev_snapshot)
 

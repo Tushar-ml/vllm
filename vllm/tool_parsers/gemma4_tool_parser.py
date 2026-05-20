@@ -45,7 +45,9 @@ from vllm.tool_parsers.gemma4_format import (
     _parse_gemma4_array,
     extract_partial_tool_call,
     extract_tool_calls,
+    has_tool_call_markup,
     strip_leaked_empty_thinking,
+    strip_tool_call_suffix,
 )
 from vllm.tool_parsers.utils import find_common_prefix
 
@@ -128,7 +130,7 @@ class Gemma4ToolParser(ToolParser):
         self._tool_end_count = 0
         self._seen_tool_call = False
         self._clean_content_prefix = ""
-        self._clean_content_raw_len = 0
+        self._clean_content_previous_text: str | None = None
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -188,23 +190,26 @@ class Gemma4ToolParser(ToolParser):
         markers are often split across chunks. Compare cleaned full prefixes so
         fragments like ``<|channel>`` never reach the client.
         """
-        if (
-            current_text.startswith(previous_text)
-            and len(previous_text) == self._clean_content_raw_len
-            and self._clean_content_raw_len > 0
-        ):
+        same_stream = (
+            self._clean_content_previous_text is not None
+            and previous_text == self._clean_content_previous_text
+        )
+        if same_stream and previous_text:
             clean_prev = self._clean_content_prefix
         else:
             clean_prev = strip_leaked_empty_thinking(previous_text) or ""
 
-        clean_curr = strip_leaked_empty_thinking(current_text) or ""
+        clean_curr = strip_tool_call_suffix(
+            strip_leaked_empty_thinking(current_text) or ""
+        )
+        clean_prev = strip_tool_call_suffix(clean_prev)
         self._clean_content_prefix = clean_curr
-        self._clean_content_raw_len = len(current_text)
+        self._clean_content_previous_text = current_text
 
         if clean_curr.startswith(clean_prev):
             out = clean_curr[len(clean_prev) :]
             return out if out else None
-        cleaned = strip_leaked_empty_thinking(delta_text)
+        cleaned = strip_tool_call_suffix(strip_leaked_empty_thinking(delta_text))
         return cleaned if cleaned else None
 
     # ------------------------------------------------------------------
@@ -280,8 +285,8 @@ class Gemma4ToolParser(ToolParser):
         # accumulated model text or normal content like "<div>" can be
         # duplicated into "<<div>" when a tool call just ended.
 
-        # If no tool call token seen yet, emit as content
-        if not self._seen_tool_call and self.tool_call_start_token not in current_text:
+        # If no tool call markup seen yet, emit as content (never raw call:{...}).
+        if not self._seen_tool_call and not has_tool_call_markup(current_text):
             out = self._streaming_pre_tool_content_delta(
                 previous_text, current_text, delta_text
             )
@@ -318,7 +323,7 @@ class Gemma4ToolParser(ToolParser):
         if delta_text:
             self._tool_start_count += delta_text.count(self.tool_call_start_token)
             self._tool_end_count += delta_text.count(self.tool_call_end_token)
-            if self._tool_start_count > 0:
+            if has_tool_call_markup(delta_text) or has_tool_call_markup(current_text):
                 self._seen_tool_call = True
         start_count = self._tool_start_count
         end_count = self._tool_end_count
@@ -354,7 +359,9 @@ class Gemma4ToolParser(ToolParser):
             return self._handle_tool_call_end(current_text)
 
         # Case 4: In the middle of a tool call — parse partial content
-        if start_count > end_count:
+        if start_count > end_count or (
+            self._seen_tool_call and "call:" in current_text
+        ):
             return self._handle_tool_call_middle(current_text)
 
         # Default: generate text outside tool calls

@@ -34,6 +34,8 @@ _INCOMPLETE_SUFFIXES: tuple[str, ...] = tuple(
                 CHANNEL_END,
                 CHANNEL_START + THOUGHT_PREFIX,
                 TOOL_CALL_START,
+                TOOL_CALL_END,
+                STRING_DELIM,
             )
             for i in range(1, len(tok))
         },
@@ -46,6 +48,50 @@ _EMPTY_THINKING_PATTERNS = (
     CHANNEL_START + THOUGHT_PREFIX + CHANNEL_END,
     CHANNEL_START + "thought\r\n" + CHANNEL_END,
 )
+
+
+def tool_call_markup_start(text: str) -> int:
+    """Index where Gemma4 tool-call markup begins, or ``-1``.
+
+    Matches ``<|tool_call>`` or bare ``call:name{`` after the last ``<channel|>``.
+    """
+    i = text.find(TOOL_CALL_START)
+    if i != -1:
+        return i
+    search_from = 0
+    channel_end = text.rfind(CHANNEL_END)
+    if channel_end != -1:
+        search_from = channel_end + len(CHANNEL_END)
+    slice_text = text[search_from:]
+    call_rel = slice_text.find("call:")
+    if call_rel == -1:
+        return -1
+    call_abs = search_from + call_rel
+    brace = text.find("{", call_abs + 5)
+    if brace == -1:
+        return -1
+    return call_abs
+
+
+def has_tool_call_markup(text: str) -> bool:
+    """True if *text* contains Gemma4 tool-call delimiters or a bare ``call:fn{`` block."""
+    if TOOL_CALL_START in text or TOOL_CALL_END in text or STRING_DELIM in text:
+        return True
+    return tool_call_markup_start(text) != -1
+
+
+def strip_tool_call_suffix(text: str) -> str:
+    """Remove trailing tool-call markup so it is not emitted as client ``content``."""
+    idx = tool_call_markup_start(text)
+    if idx != -1:
+        text = text[:idx]
+    return text.rstrip()
+
+
+def extract_tool_handoff_text(text: str) -> str:
+    """Text from the first tool-call marker onward (for reasoning→tool handoff)."""
+    idx = tool_call_markup_start(text)
+    return text[idx:] if idx != -1 else ""
 
 
 def _compact_cf_no_ws(core: str, cf_core: str | None = None) -> str:
@@ -162,6 +208,9 @@ def strip_leaked_empty_thinking(text: str) -> str:
 
 def _finalize_client_content(text: str | None) -> str | None:
     after = strip_leaked_empty_thinking(text) if text is not None else None
+    if not after:
+        return None
+    after = strip_tool_call_suffix(after)
     return after if after else None
 
 
@@ -261,20 +310,28 @@ def extract_tool_calls(text: str) -> list[tuple[str, str]]:
                 )
                 results.append((func_name, args_str))
         search_from = end + len(TOOL_CALL_END)
+
+    if results:
+        return results
+
+    # Bare ``call:name{...}<tool_call|>`` without ``<|tool_call>`` (handoff loss).
+    search_from = 0
+    while True:
+        call_idx = text.find("call:", search_from)
+        if call_idx == -1:
+            break
+        end = text.find(TOOL_CALL_END, call_idx)
+        if end == -1:
+            break
+        func_name, args_str = _parse_call_region(text[call_idx:end])
+        if func_name:
+            results.append((func_name, args_str))
+        search_from = end + len(TOOL_CALL_END)
     return results
 
 
-def extract_partial_tool_call(current_text: str) -> tuple[str | None, str]:
-    """Parse active (possibly incomplete) tool call after last ``TOOL_CALL_START``.
-
-    Returns ``(func_name, raw_args_str)``. ``func_name`` is ``None`` until ``call:name{``
-    is complete. ``raw_args_str`` is the interior of ``{...}`` (balanced when complete).
-    """
-    last_start = current_text.rfind(TOOL_CALL_START)
-    if last_start == -1:
-        return None, ""
-
-    partial_call = current_text[last_start + len(TOOL_CALL_START) :]
+def _parse_call_region(partial_call: str) -> tuple[str | None, str]:
+    """Parse ``call:name{args...}`` (optional surrounding tool tags already removed)."""
     if TOOL_CALL_END in partial_call:
         partial_call = partial_call.split(TOOL_CALL_END, 1)[0]
 
@@ -295,6 +352,25 @@ def extract_partial_tool_call(current_text: str) -> tuple[str | None, str]:
     return func_name, args_str
 
 
+def extract_partial_tool_call(current_text: str) -> tuple[str | None, str]:
+    """Parse active (possibly incomplete) tool call after last ``TOOL_CALL_START``.
+
+    Returns ``(func_name, raw_args_str)``. ``func_name`` is ``None`` until ``call:name{``
+    is complete. ``raw_args_str`` is the interior of ``{...}`` (balanced when complete).
+
+    Falls back to bare ``call:name{`` when ``<|tool_call>`` was dropped on the
+    reasoning→tool handoff chunk (``enable_thinking``).
+    """
+    last_start = current_text.rfind(TOOL_CALL_START)
+    if last_start != -1:
+        partial_call = current_text[last_start + len(TOOL_CALL_START) :]
+        return _parse_call_region(partial_call)
+
+    call_idx = tool_call_markup_start(current_text)
+    if call_idx == -1:
+        return None, ""
+
+    return _parse_call_region(current_text[call_idx:])
 def _parse_gemma4_value(value_str: str) -> object:
     value_str = value_str.strip()
     if not value_str:

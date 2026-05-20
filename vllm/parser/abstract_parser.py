@@ -683,7 +683,13 @@ class DelegatingParser(Parser):
                     current_text = delta_message.content
                     delta_message.content = None
                 else:
-                    current_text = ""
+                    # Preserve tool-call tail from this chunk (Gemma4 may end
+                    # reasoning on <|tool_call>| in the same delta).
+                    from vllm.tool_parsers.gemma4_format import (
+                        extract_tool_handoff_text,
+                    )
+
+                    current_text = extract_tool_handoff_text(current_text)
 
         # Tool call extraction
         if self._in_tool_call_phase(state):
