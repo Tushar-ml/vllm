@@ -171,6 +171,26 @@ class Gemma4ToolParser(ToolParser):
         self.buffered_delta_text = ""
         return combined
 
+    def _streaming_pre_tool_content_delta(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+    ) -> str | None:
+        """Visible text before the first tool call, diffed on *stripped* prefixes.
+
+        Per-delta ``strip_leaked_empty_thinking(delta_text)`` is not enough: channel
+        markers are often split across chunks. Compare cleaned full prefixes so
+        fragments like ``<|channel>`` never reach the client.
+        """
+        clean_prev = strip_leaked_empty_thinking(previous_text) or ""
+        clean_curr = strip_leaked_empty_thinking(current_text) or ""
+        if clean_curr.startswith(clean_prev):
+            out = clean_curr[len(clean_prev) :]
+            return out if out else None
+        cleaned = strip_leaked_empty_thinking(delta_text)
+        return cleaned if cleaned else None
+
     # ------------------------------------------------------------------
     # Non-streaming extraction
     # ------------------------------------------------------------------
@@ -246,10 +266,11 @@ class Gemma4ToolParser(ToolParser):
 
         # If no tool call token seen yet, emit as content
         if self.tool_call_start_token not in current_text:
-            if delta_text:
-                cleaned = strip_leaked_empty_thinking(delta_text)
-                if cleaned:
-                    return DeltaMessage(content=cleaned)
+            out = self._streaming_pre_tool_content_delta(
+                previous_text, current_text, delta_text
+            )
+            if out:
+                return DeltaMessage(content=out)
             return None
 
         try:
@@ -287,10 +308,11 @@ class Gemma4ToolParser(ToolParser):
             and prev_end_count == end_count
             and self.tool_call_end_token not in delta_text
         ):
-            if delta_text:
-                cleaned = strip_leaked_empty_thinking(delta_text)
-                if cleaned:
-                    return DeltaMessage(content=cleaned)
+            out = self._streaming_pre_tool_content_delta(
+                previous_text, current_text, delta_text
+            )
+            if out:
+                return DeltaMessage(content=out)
             return None
 
         # Case 2: Starting a new tool call
@@ -316,11 +338,20 @@ class Gemma4ToolParser(ToolParser):
 
         # Default: generate text outside tool calls
         if delta_text:
-            text = delta_text.replace(self.tool_call_start_token, "")
-            text = text.replace(self.tool_call_end_token, "")
-            text = strip_leaked_empty_thinking(text)
-            if text:
-                return DeltaMessage(content=text)
+            adj_prev = previous_text.replace(self.tool_call_start_token, "").replace(
+                self.tool_call_end_token, ""
+            )
+            adj_curr = current_text.replace(self.tool_call_start_token, "").replace(
+                self.tool_call_end_token, ""
+            )
+            adj_delta = delta_text.replace(self.tool_call_start_token, "").replace(
+                self.tool_call_end_token, ""
+            )
+            out = self._streaming_pre_tool_content_delta(
+                adj_prev, adj_curr, adj_delta
+            )
+            if out:
+                return DeltaMessage(content=out)
         return None
 
     def _handle_tool_call_middle(self, current_text: str) -> DeltaMessage | None:

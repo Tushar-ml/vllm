@@ -26,6 +26,10 @@ def strip_leaked_empty_thinking(text: str) -> str:
     The model sometimes emits one or more copies of
     ``<|channel>thought\\n<channel|>`` even with ``enable_thinking: false``.
     Those snippets must not appear in customer-visible ``content``.
+
+    After removing those blocks, **orphaned** ``<|channel>`` / ``<channel|>``
+    fragments are stripped as well — the model may emit an extra opening tag
+    before ``<|tool_call>``, and streaming used to surface one chunk at a time.
     """
     if not text:
         return text
@@ -42,7 +46,15 @@ def strip_leaked_empty_thinking(text: str) -> str:
             if p in s:
                 s = s.replace(p, "")
                 changed = True
-    return s.strip()
+    # Remove any remaining channel delimiters (customer-visible text must not
+    # contain these control tokens; they only appear in raw model format).
+    while True:
+        old = s
+        s = s.replace(CHANNEL_START, "").replace(CHANNEL_END, "")
+        s = s.strip()
+        if s == old:
+            break
+    return s
 
 
 def _finalize_client_content(text: str | None) -> str | None:

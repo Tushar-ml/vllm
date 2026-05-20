@@ -509,6 +509,28 @@ class TestStreamingExtraction:
 
         assert "".join(content_parts).strip().startswith("Let me check")
 
+    def test_streaming_suppressed_thinking_fragments_not_in_content(
+        self, parser, mock_request
+    ):
+        """suppress-CoT channel markers split across deltas must never reach clients."""
+        chunks = [
+            "<|channel>",
+            "thought\n",
+            "<channel|>",
+            "<|channel>",
+            "Hi. ",
+            "<|tool_call>",
+            "call:get_status{}",
+            "<tool_call|>",
+        ]
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        joined = "".join(
+            delta.content for delta, _ in results if delta and delta.content
+        )
+        assert "<|channel>" not in joined
+        assert "<channel|>" not in joined
+        assert joined.strip().startswith("Hi.")
+
     def test_streaming_numeric_args(self, parser, mock_request):
         """Streaming with numeric and boolean argument values."""
         chunks = [
