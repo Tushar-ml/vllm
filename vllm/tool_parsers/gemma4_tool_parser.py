@@ -124,6 +124,11 @@ class Gemma4ToolParser(ToolParser):
         self.current_tool_name_sent = False
         self.prev_tool_call_arr: list[dict] = []
         self.streamed_args_for_tool: list[str] = []
+        self._tool_start_count = 0
+        self._tool_end_count = 0
+        self._seen_tool_call = False
+        self._clean_content_prefix = ""
+        self._clean_content_raw_len = 0
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -183,8 +188,19 @@ class Gemma4ToolParser(ToolParser):
         markers are often split across chunks. Compare cleaned full prefixes so
         fragments like ``<|channel>`` never reach the client.
         """
-        clean_prev = strip_leaked_empty_thinking(previous_text) or ""
+        if (
+            current_text.startswith(previous_text)
+            and len(previous_text) == self._clean_content_raw_len
+            and self._clean_content_raw_len > 0
+        ):
+            clean_prev = self._clean_content_prefix
+        else:
+            clean_prev = strip_leaked_empty_thinking(previous_text) or ""
+
         clean_curr = strip_leaked_empty_thinking(current_text) or ""
+        self._clean_content_prefix = clean_curr
+        self._clean_content_raw_len = len(current_text)
+
         if clean_curr.startswith(clean_prev):
             out = clean_curr[len(clean_prev) :]
             return out if out else None
@@ -265,7 +281,7 @@ class Gemma4ToolParser(ToolParser):
         # duplicated into "<<div>" when a tool call just ended.
 
         # If no tool call token seen yet, emit as content
-        if self.tool_call_start_token not in current_text:
+        if not self._seen_tool_call and self.tool_call_start_token not in current_text:
             out = self._streaming_pre_tool_content_delta(
                 previous_text, current_text, delta_text
             )
@@ -297,10 +313,15 @@ class Gemma4ToolParser(ToolParser):
 
         Format: ``<|tool_call>call:name{args}<tool_call|>``
         """
-        start_count = current_text.count(self.tool_call_start_token)
-        end_count = current_text.count(self.tool_call_end_token)
-        prev_start_count = previous_text.count(self.tool_call_start_token)
-        prev_end_count = previous_text.count(self.tool_call_end_token)
+        prev_start_count = self._tool_start_count
+        prev_end_count = self._tool_end_count
+        if delta_text:
+            self._tool_start_count += delta_text.count(self.tool_call_start_token)
+            self._tool_end_count += delta_text.count(self.tool_call_end_token)
+            if self._tool_start_count > 0:
+                self._seen_tool_call = True
+        start_count = self._tool_start_count
+        end_count = self._tool_end_count
 
         # Case 1: Not inside any tool call — emit as content
         if (

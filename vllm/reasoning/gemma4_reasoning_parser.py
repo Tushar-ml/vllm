@@ -8,6 +8,7 @@ from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.gemma4_format import (
+    diff_reasoning_streaming_snapshots,
     extract_reasoning_non_streaming,
     strip_trailing_incomplete_token,
 )
@@ -35,6 +36,9 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         self.new_turn_token_id = self.vocab["<|turn>"]
         self.tool_call_token_id = self.vocab["<|tool_call>"]
         self.tool_response_token_id = self.vocab["<|tool_response>"]
+        # Streaming cache: previous safe prefix → last parse snapshot.
+        self._stream_safe_prev: str | None = None
+        self._stream_prev_snapshot: tuple[str | None, str | None] | None = None
 
     def adjust_request(
         self, request: "ChatCompletionRequest | ResponsesRequest"
@@ -90,19 +94,24 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         del delta_text, previous_token_ids, current_token_ids, delta_token_ids
 
         safe_curr = strip_trailing_incomplete_token(current_text)
+        if self._stream_safe_prev is not None and safe_curr == self._stream_safe_prev:
+            return None
+
         safe_prev = strip_trailing_incomplete_token(previous_text)
+        if (
+            self._stream_safe_prev is not None
+            and safe_prev == self._stream_safe_prev
+            and self._stream_prev_snapshot is not None
+        ):
+            prev_snapshot = self._stream_prev_snapshot
+        else:
+            prev_snapshot = extract_reasoning_non_streaming(safe_prev)
 
-        r_curr, c_curr = extract_reasoning_non_streaming(safe_curr)
-        r_prev, c_prev = extract_reasoning_non_streaming(safe_prev)
+        curr_snapshot = extract_reasoning_non_streaming(safe_curr)
+        self._stream_safe_prev = safe_curr
+        self._stream_prev_snapshot = curr_snapshot
 
-        def norm(x: str | None) -> str:
-            return "" if x is None else x
-
-        nr, nc = norm(r_curr), norm(c_curr)
-        nr_prev, nc_prev = norm(r_prev), norm(c_prev)
-
-        dr = nr[len(nr_prev) :] if nr.startswith(nr_prev) else nr
-        dc = nc[len(nc_prev) :] if nc.startswith(nc_prev) else nc
+        dr, dc = diff_reasoning_streaming_snapshots(curr_snapshot, prev_snapshot)
 
         # Prefer reasoning deltas first — never emit both in one message.
         if dr:

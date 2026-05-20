@@ -24,6 +24,29 @@ _LEN_TH = len(_TH_WORD)
 _TH_PAIR = _TH_WORD * 2
 _LEN_PAIR = len(_TH_PAIR)
 
+# Longest-first incomplete marker suffixes for streaming (module-level, built once).
+_INCOMPLETE_SUFFIXES: tuple[str, ...] = tuple(
+    sorted(
+        {
+            tok[:i]
+            for tok in (
+                CHANNEL_START,
+                CHANNEL_END,
+                CHANNEL_START + THOUGHT_PREFIX,
+                TOOL_CALL_START,
+            )
+            for i in range(1, len(tok))
+        },
+        key=len,
+        reverse=True,
+    )
+)
+
+_EMPTY_THINKING_PATTERNS = (
+    CHANNEL_START + THOUGHT_PREFIX + CHANNEL_END,
+    CHANNEL_START + "thought\r\n" + CHANNEL_END,
+)
+
 
 def _compact_cf_no_ws(core: str, cf_core: str | None = None) -> str:
     """Fold case and drop **all** whitespace (matches ``str.isspace()`` semantics via split)."""
@@ -115,29 +138,26 @@ def strip_leaked_empty_thinking(text: str) -> str:
     """
     if not text:
         return text
+    if (
+        CHANNEL_START not in text
+        and CHANNEL_END not in text
+        and "thought" not in text.casefold()
+    ):
+        return text
     s = text
-    # Primary + Windows-style newline variant
-    patterns = (
-        CHANNEL_START + THOUGHT_PREFIX + CHANNEL_END,
-        CHANNEL_START + "thought\r\n" + CHANNEL_END,
-    )
-    changed = True
-    while changed:
-        changed = False
-        for p in patterns:
-            if p in s:
-                s = s.replace(p, "")
-                changed = True
+    for p in _EMPTY_THINKING_PATTERNS:
+        if p in s:
+            s = s.replace(p, "")
     # Remove any remaining channel delimiters (customer-visible text must not
     # contain these control tokens; they only appear in raw model format).
-    while True:
-        old = s
-        s = s.replace(CHANNEL_START, "").replace(CHANNEL_END, "")
-        s = s.strip()
-        if s == old:
-            break
-    s = strip_thought_shard_echoes(s)
-    return s
+    if CHANNEL_START in s or CHANNEL_END in s:
+        while True:
+            old = s
+            s = s.replace(CHANNEL_START, "").replace(CHANNEL_END, "")
+            s = s.strip()
+            if s == old:
+                break
+    return strip_thought_shard_echoes(s)
 
 
 def _finalize_client_content(text: str | None) -> str | None:
@@ -468,17 +488,25 @@ def strip_trailing_incomplete_token(text: str) -> str:
     """Trim suffix that may be an incomplete Gemma4 marker (streaming-safe)."""
     if not text:
         return text
-    tokens = (
-        CHANNEL_START,
-        CHANNEL_END,
-        CHANNEL_START + THOUGHT_PREFIX,
-        TOOL_CALL_START,
-    )
     longest = 0
-    for tok in tokens:
-        for i in range(len(tok) - 1, 0, -1):
-            pref = tok[:i]
-            if text.endswith(pref) and len(pref) > longest:
-                longest = len(pref)
+    for pref in _INCOMPLETE_SUFFIXES:
+        if text.endswith(pref) and len(pref) > longest:
+            longest = len(pref)
     return text[:-longest] if longest else text
+
+
+def _norm_snapshot_part(x: str | None) -> str:
+    return "" if x is None else x
+
+
+def diff_reasoning_streaming_snapshots(
+    curr: tuple[str | None, str | None],
+    prev: tuple[str | None, str | None],
+) -> tuple[str, str]:
+    """Return ``(reasoning_delta, content_delta)`` from two parse snapshots."""
+    nr, nc = _norm_snapshot_part(curr[0]), _norm_snapshot_part(curr[1])
+    nr_prev, nc_prev = _norm_snapshot_part(prev[0]), _norm_snapshot_part(prev[1])
+    dr = nr[len(nr_prev) :] if nr.startswith(nr_prev) else nr
+    dc = nc[len(nc_prev) :] if nc.startswith(nc_prev) else nc
+    return dr, dc
 
