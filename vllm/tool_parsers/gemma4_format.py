@@ -19,6 +19,77 @@ TOOL_CALL_START = "<|tool_call>"
 TOOL_CALL_END = "<tool_call|>"
 STRING_DELIM = '<|"|>'
 
+_TH_WORD = "thought"
+_LEN_TH = len(_TH_WORD)
+_TH_PAIR = _TH_WORD * 2
+_LEN_PAIR = len(_TH_PAIR)
+
+
+def strip_thought_shard_echoes(text: str) -> str:
+    """Strip glued ``thought`` shards (sometimes truncated mid-token at stream cut).
+
+    Models occasionally emit ``thoughtthoughtthought...`` or ``...thoughttho`` as
+    plain ``content``. Peel **pairs** of ``thought`` so odd genuine prefixes stay
+    tractable, then strip a lone tail ``thought`` or a streaming prefix thereof.
+
+    ``thoughtthoughtful`` remains untouched (after removing pairs the shard ``ful``
+    is a suffix of the English word ``thoughtful``, not ``thought`` garbage).
+    """
+    if not text or "thought" not in text.casefold():
+        return text
+
+    rebuilt: list[str] = []
+    for raw_line in text.splitlines(keepends=True):
+        nl = ""
+        core = raw_line
+        if raw_line.endswith("\n"):
+            nl = "\n"
+            core = raw_line[:-1]
+
+        compact = "".join(ch for ch in core.casefold() if not ch.isspace())
+        if not compact:
+            rebuilt.append(raw_line)
+            continue
+
+        c = compact
+        while c.startswith(_TH_PAIR):
+            c = c[_LEN_PAIR:]
+
+        if not c:
+            rebuilt.append(nl)
+            continue
+
+        if c == _TH_WORD:
+            rebuilt.append(nl)
+            continue
+
+        if len(c) < _LEN_TH and _TH_WORD.startswith(c):
+            rebuilt.append(nl)
+            continue
+
+        if len(c) <= 5 and _TH_WORD.endswith(c) and c != _TH_WORD:
+            rebuilt.append(core + nl)
+            continue
+
+        # ``thought`` + truncated continuation from streaming cut (e.g. ``thoughttho``).
+        if (
+            len(c) > _LEN_TH
+            and c.startswith(_TH_WORD)
+            and _TH_WORD.startswith(c[_LEN_TH:])
+            and c[_LEN_TH:] != _TH_WORD
+        ):
+            rebuilt.append(nl)
+            continue
+
+        # Leading ``thought`` glued to normal text (not a continuation shard).
+        if c.startswith(_TH_WORD):
+            rebuilt.append(core + nl)
+            continue
+
+        rebuilt.append(core + nl)
+
+    return "".join(rebuilt)
+
 
 def strip_leaked_empty_thinking(text: str) -> str:
     """Remove echoed empty thinking channels (Gemma4 \"suppress CoT\" pattern).
@@ -54,6 +125,7 @@ def strip_leaked_empty_thinking(text: str) -> str:
         s = s.strip()
         if s == old:
             break
+    s = strip_thought_shard_echoes(s)
     return s
 
 
