@@ -277,6 +277,20 @@ class TestExtractToolCalls:
         assert result.tools_called is True
         assert result.tool_calls[0].function.name == "weather.get"
 
+    def test_nested_details_in_arguments(self, parser, mock_request):
+        """Nested objects inside braces (SGLang parity)."""
+        model_output = (
+            '<|tool_call>call:get_weather{location:<|"|>Tokyo<|"|>,'
+            'details:{temp:25,unit:<|"|>celsius<|"|>}'
+            '}<tool_call|>'
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["location"] == "Tokyo"
+        assert args["details"] == {"temp": 25, "unit": "celsius"}
+
     def test_no_arguments(self, parser, mock_request):
         """Tool calls with empty arguments."""
         model_output = "<|tool_call>call:get_status{}<tool_call|>"
@@ -556,6 +570,21 @@ class TestStreamingExtraction:
         assert args_text, "No arguments were streamed"
         parsed_args = json.loads(args_text)
         assert parsed_args["count"] == 42
+
+    def test_nested_array_streaming_sglang_parity(self, parser, mock_request):
+        """Nested array + object inside tool args across chunks (SGLang parity)."""
+        chunks = [
+            '<|tool_call>call:get_weather{location:<|"',
+            '|>New York<|"|>,nested:[1, 2, {inner:<|"|>',
+            'val<|"|>}]}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args["location"] == "New York"
+        assert parsed_args["nested"] == [1, 2, {"inner": "val"}]
 
     def test_streaming_empty_args(self, parser, mock_request):
         """Tool call with no arguments."""

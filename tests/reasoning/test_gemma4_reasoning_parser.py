@@ -22,26 +22,26 @@ def generic_tokenizer():
 
 INVALID_SIMPLE_NONSTREAMING = {
     "output": "This is a reasoning section<channel|>This is the rest",
-    "reasoning": "This is a reasoning section",
-    "content": "This is the rest",
+    "reasoning": None,
+    "content": "This is a reasoning section<channel|>This is the rest",
     "is_reasoning_end": True,
 }
 INVALID_SIMPLE_STREAMING = {
     "output": "This is a reasoning section<channel|>This is the rest",
     "reasoning": None,
-    "content": "This is a reasoning sectionThis is the rest",
+    "content": "This is a reasoning section<channel|>This is the rest",
     "is_reasoning_end": True,
 }
 INVALID_COMPLETE_NONSTREAMING = {
     "output": "This is a reasoning section<channel|>",
-    "reasoning": "This is a reasoning section",
-    "content": None,
+    "reasoning": None,
+    "content": "This is a reasoning section<channel|>",
     "is_reasoning_end": True,
 }
 INVALID_COMPLETE_STREAMING = {
     "output": "This is a reasoning section<channel|>",
     "reasoning": None,
-    "content": "This is a reasoning section",
+    "content": "This is a reasoning section<channel|>",
     "is_reasoning_end": True,
 }
 NO_CONTENT = {
