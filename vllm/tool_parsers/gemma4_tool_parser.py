@@ -410,11 +410,37 @@ class Gemma4ToolParser(ToolParser):
 
         all_matches = extract_tool_calls(current_text)
         if self.current_tool_id < len(all_matches):
-            _, args_str = all_matches[self.current_tool_id]
+            func_name, args_str = all_matches[self.current_tool_id]
             final_args = _parse_gemma4_args(args_str)
             final_args_json = json.dumps(final_args, ensure_ascii=False)
 
             prev_streamed = self.streamed_args_for_tool[self.current_tool_id]
+
+            # Case: ``<|tool_call>`` landed in chunk N and ``call:fn{...}<tool_call|>``
+            # landed entirely in chunk N+1. We run Case 3 (end-tag) before ever hitting
+            # ``_handle_tool_call_middle``, so no prior delta contained ``id``/``name``.
+            # Downstream merges then show ``tool_call.id === null``.
+            if not self.current_tool_name_sent:
+                self.current_tool_name_sent = True
+                self.prev_tool_call_arr[self.current_tool_id] = {
+                    "name": func_name,
+                    "arguments": final_args,
+                }
+                self.streamed_args_for_tool[self.current_tool_id] = final_args_json
+                return DeltaMessage(
+                    tool_calls=[
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            type="function",
+                            id=make_tool_call_id(),
+                            function=DeltaFunctionCall(
+                                name=func_name,
+                                arguments=final_args_json,
+                            ).model_dump(exclude_none=True),
+                        )
+                    ]
+                )
+
             if len(final_args_json) > len(prev_streamed):
                 diff = final_args_json[len(prev_streamed) :]
                 self.streamed_args_for_tool[self.current_tool_id] = final_args_json
@@ -474,8 +500,8 @@ class Gemma4ToolParser(ToolParser):
             )
             return None
 
-        if not current_args:
-            return None
+        # Note: ``current_args`` may be ``{}`` (zero-arg tool); ``not current_args``
+        # would incorrectly suppress streaming for that case.
 
         current_args_json = json.dumps(current_args, ensure_ascii=False)
 
