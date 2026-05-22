@@ -10,11 +10,13 @@ import os
 import signal
 import socket
 import tempfile
+import urllib.request
 import warnings
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import urlparse
 
 import uvloop
 from fastapi import FastAPI, HTTPException
@@ -595,14 +597,41 @@ def setup_server(args):
     return listen_address, sock
 
 
+def _load_prefix_warmup_bytes(location: str) -> bytes:
+    """Load the raw warmup-file bytes from a local path or an http(s) URL.
+
+    The scheme of ``location`` selects the loader: ``http``/``https`` download via
+    urllib (use a presigned URL to fetch from object stores such as S3 without
+    credentials on the host), anything else is treated as a local filesystem
+    path. Failures raise ``RuntimeError`` so startup aborts.
+    """
+    scheme = urlparse(location).scheme.lower()
+
+    if scheme in ("http", "https"):
+        try:
+            with urllib.request.urlopen(location, timeout=30) as resp:
+                return resp.read()
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to download prefix warmup file from {location}: {e}"
+            ) from e
+
+    try:
+        with open(location, "rb") as f:
+            return f.read()
+    except FileNotFoundError as e:
+        raise RuntimeError(f"Prefix warmup file not found: {location}") from e
+
+
 async def run_prefix_warmup(state: State, args: Namespace) -> None:
     """Prime the prefix/KV cache by running chat warmup requests.
 
     Reads ``args.prefix_warmup_file`` (a JSON list of chat-completion-style
     requests) and runs each one through the same chat serving handler used for
-    real traffic, so the chat template and tokenization match exactly. This runs
-    before ``serve_http``, so ``/health`` is not yet reachable. Any failure
-    raises ``RuntimeError`` and aborts server startup (fatal).
+    real traffic, so the chat template and tokenization match exactly. The flag
+    accepts a local path, an http(s) URL, or an s3:// URL. This runs before
+    ``serve_http``, so ``/health`` is not yet reachable. Any failure raises
+    ``RuntimeError`` and aborts server startup (fatal).
     """
     warmup_path = getattr(args, "prefix_warmup_file", None)
     if not warmup_path:
@@ -616,11 +645,9 @@ async def run_prefix_warmup(state: State, args: Namespace) -> None:
             "supported by this model). Aborting startup."
         )
 
+    raw = _load_prefix_warmup_bytes(warmup_path)
     try:
-        with open(warmup_path, encoding="utf-8") as f:
-            entries = json.load(f)
-    except FileNotFoundError as e:
-        raise RuntimeError(f"Prefix warmup file not found: {warmup_path}") from e
+        entries = json.loads(raw)
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f"Prefix warmup file is not valid JSON ({warmup_path}): {e}"
