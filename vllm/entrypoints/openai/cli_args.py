@@ -83,6 +83,12 @@ class BaseFrontendArgs:
     chat_template: str | None = None
     """The file path to the chat template, or the template in single-line form
     for the specified model."""
+    prefix_warmup_file: str | None = None
+    """Path to a JSON file of chat-completion-style warmup requests. Before the
+    server accepts traffic, each request is run through the chat engine to prime
+    the prefix/KV cache. Any failure aborts startup. The file must be a JSON list
+    of objects, each with a non-empty "messages" list and optional "max_tokens"
+    and sampling fields."""
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     """The format to render message content within a chat template.
 

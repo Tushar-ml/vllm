@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import inspect
+import json
 import multiprocessing
 import multiprocessing.forkserver as forkserver
 import os
@@ -28,8 +29,12 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+)
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.engine.protocol import GenerationError
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse, GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.server_utils import (
@@ -590,6 +595,103 @@ def setup_server(args):
     return listen_address, sock
 
 
+async def run_prefix_warmup(state: State, args: Namespace) -> None:
+    """Prime the prefix/KV cache by running chat warmup requests.
+
+    Reads ``args.prefix_warmup_file`` (a JSON list of chat-completion-style
+    requests) and runs each one through the same chat serving handler used for
+    real traffic, so the chat template and tokenization match exactly. This runs
+    before ``serve_http``, so ``/health`` is not yet reachable. Any failure
+    raises ``RuntimeError`` and aborts server startup (fatal).
+    """
+    warmup_path = getattr(args, "prefix_warmup_file", None)
+    if not warmup_path:
+        return
+
+    chat_handler = getattr(state, "openai_serving_chat", None)
+    if chat_handler is None:
+        raise RuntimeError(
+            "Prefix warmup requested via --prefix-warmup-file but the chat "
+            "completions API is unavailable (the 'generate' task is not "
+            "supported by this model). Aborting startup."
+        )
+
+    try:
+        with open(warmup_path, encoding="utf-8") as f:
+            entries = json.load(f)
+    except FileNotFoundError as e:
+        raise RuntimeError(f"Prefix warmup file not found: {warmup_path}") from e
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"Prefix warmup file is not valid JSON ({warmup_path}): {e}"
+        ) from e
+
+    if not isinstance(entries, list):
+        raise RuntimeError(
+            f"Prefix warmup file must contain a JSON list, got "
+            f"{type(entries).__name__}: {warmup_path}"
+        )
+    if not entries:
+        logger.warning(
+            "Prefix warmup file %s is empty; nothing to warm up.", warmup_path
+        )
+        return
+
+    served_model_name = state.openai_serving_models.base_model_paths[0].name
+
+    logger.info(
+        "Running prefix warmup: %d request(s) from %s", len(entries), warmup_path
+    )
+
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise RuntimeError(
+                f"Prefix warmup entry #{idx} must be a JSON object, got "
+                f"{type(entry).__name__}"
+            )
+        messages = entry.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise RuntimeError(
+                f"Prefix warmup entry #{idx} must have a non-empty 'messages' list"
+            )
+
+        request_kwargs = dict(entry)
+        request_kwargs.setdefault("max_tokens", 1)
+        request_kwargs["model"] = served_model_name
+        request_kwargs["stream"] = False
+        request_kwargs["request_id"] = f"prefix-warmup-{idx}"
+
+        try:
+            request = ChatCompletionRequest(**request_kwargs)
+        except Exception as e:
+            raise RuntimeError(
+                f"Prefix warmup entry #{idx} is not a valid chat request: {e}"
+            ) from e
+
+        result = await chat_handler.create_chat_completion(request, raw_request=None)
+
+        if isinstance(result, ErrorResponse):
+            raise RuntimeError(
+                f"Prefix warmup request #{idx} failed: {result.error.message} "
+                f"(code={result.error.code})"
+            )
+        if not isinstance(result, ChatCompletionResponse):
+            raise RuntimeError(
+                f"Prefix warmup request #{idx} returned unexpected type "
+                f"{type(result).__name__}; expected ChatCompletionResponse."
+            )
+
+        usage = getattr(result, "usage", None)
+        logger.info(
+            "Prefix warmup request #%d/%d primed (prompt_tokens=%s)",
+            idx + 1,
+            len(entries),
+            getattr(usage, "prompt_tokens", "?"),
+        )
+
+    logger.info("Prefix warmup complete: %d request(s) primed.", len(entries))
+
+
 async def build_and_serve(
     engine_client: EngineClient,
     listen_address: str,
@@ -613,6 +715,10 @@ async def build_and_serve(
     logger.info("Supported tasks: %s", supported_tasks)
     app = build_app(args, supported_tasks, model_config)
     await init_app_state(engine_client, app.state, args, supported_tasks)
+
+    # Prefix warmup runs before serve_http, so /health is not yet reachable.
+    # A failure here aborts startup (fatal) before the server accepts traffic.
+    await run_prefix_warmup(app.state, args)
 
     logger.info("Starting vLLM server on %s", listen_address)
 
