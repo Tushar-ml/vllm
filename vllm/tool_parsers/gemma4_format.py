@@ -210,8 +210,9 @@ def _finalize_client_content(text: str | None) -> str | None:
     after = strip_leaked_empty_thinking(text) if text is not None else None
     if not after:
         return None
-    after = strip_tool_call_suffix(after)
-    return after if after else None
+    # Do not strip_tool_call_suffix here: on the non-streaming path this output
+    # is fed into the tool-call parser next, which needs the markup intact.
+    return after
 
 
 def strip_thought_label(text: str) -> str:
