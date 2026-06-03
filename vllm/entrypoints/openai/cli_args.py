@@ -90,6 +90,11 @@ class BaseFrontendArgs:
     request is run through the chat engine to prime the prefix/KV cache. Any
     failure aborts startup. The file must be a JSON list of objects, each with a
     non-empty "messages" list and optional "max_tokens" and sampling fields."""
+    prefix_warmup_count: int | None = None
+    """When set, only run the first N entries from ``--prefix-warmup-file`` (not
+    the entire list). Useful for large warmup files when a subset is enough."""
+    prefix_warmup_parallel: bool = False
+    """Run prefix warmup entries concurrently instead of one at a time."""
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     """The format to render message content within a chat template.
 

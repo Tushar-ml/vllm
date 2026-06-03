@@ -1,0 +1,1304 @@
+{
+  "data": [
+    {
+      "session_id": "548f97f4-9866-4349-82b6-2613c121ed5a",
+      "payloads": [
+        {
+          "prompt": [
+            " Another room in the Castle Enter Queen and Polonius POLONIUS He will come straight Look you lay home to him Tell him his pranks have been too broad to bear with And that your Grace hath screend and stood between Much heat and him Ill silence me een here Pray you be round with him HAM"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 133
+        }
+      ]
+    },
+    {
+      "session_id": "11d8f959-18a5-41cc-ac42-f0307d396e4e",
+      "payloads": [
+        {
+          "prompt": [
+            " a foolish wit God bless thee lady OLIVIA Take the fool away CLOWN Do you not hear fellows Take away the lady OLIVIA Go to yare a dry fool Ill no more of you Besides you grow dishonest CLOWN Two faults madonna that drink and good counsel will amend for give the dry fool drink then is the fool"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 129
+        }
+      ]
+    },
+    {
+      "session_id": "933c454e-61de-425f-9295-39d1db413b7a",
+      "payloads": [
+        {
+          "prompt": [
+            "ift with merry look CAPULET How now my headstrong Where have you been gadding JULIET Where I have learnt me to repent the sin Of disobedient opposition To you and your behests and am enjoind By holy Lawrence to fall prostrate here To beg your pardon Pardon I besee"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 125
+        }
+      ]
+    },
+    {
+      "session_id": "275fbc12-992e-4409-ba3e-9e3f48caa97d",
+      "payloads": [
+        {
+          "prompt": [
+            " and back the same grief draw Which speechless woe of his poor she attendeth And his untimely frenzy thus awaketh Dear lord thy sorrow to my sorrow lendeth Another power no flood by raining slaketh My woe too sensible thy passion maketh More feeling"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 130
+        }
+      ]
+    },
+    {
+      "session_id": "c81bc5b4-f644-4796-8952-c1a1cabbb239",
+      "payloads": [
+        {
+          "prompt": [
+            " I live thou livst in my defame Since thou couldst not defend thy loyal dame And wast afeared to scratch her wicked foe Kill both thyself and her for yielding so This said from her betumbled couch she starteth To find some desprate instrument of death But this no slaughterhouse no tool"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 128
+        }
+      ]
+    },
+    {
+      "session_id": "041b5be7-209c-4660-99c9-4955326f1636",
+      "payloads": [
+        {
+          "prompt": [
+            " make ye Think ye see The very persons of our noble story As they were living think you see them great And followed with the general throng and sweat Of thousand friends then in a moment see How soon this mightiness meets misery And if you can be merry then Ill say A man may weep upon his wedding day Exit ACT I SCENE I London An"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 130
+        }
+      ]
+    },
+    {
+      "session_id": "5a169ad2-f37f-4da4-ac46-7c3269aa8f7f",
+      "payloads": [
+        {
+          "prompt": [
+            " stag when snow the pasture sheets The barks of trees thou browsed On the Alps It is reported thou didst eat strange flesh Which some did die to look on And all this It wounds thine honour that I speak it now Was borne so like a soldier that thy cheek So much as lanked not LEPIDUS Tis pity of him"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 123
+        }
+      ]
+    },
+    {
+      "session_id": "6e32919c-dd0b-4d7c-8c48-6d07880ff8db",
+      "payloads": [
+        {
+          "prompt": [
+            " The army is discharged all and gone FALSTAFF Let them go Ill through Gloucestershire and there will I visit Master Robert Shallow Esquire I have him already tempering between my finger and my thumb and shortly will I seal with him Come away Exeunt SCENE IV Westminster The Jerusalem Chamber Enter the King"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 128
+        }
+      ]
+    },
+    {
+      "session_id": "af827022-a260-4291-b252-024ef172844d",
+      "payloads": [
+        {
+          "prompt": [
+            "able But who dare tell her so If I should speak She would mock me into air O she would laugh me Out of myself press me to death with wit Therefore let Benedick like coverd fire Consume away in sighs waste inwardly It were a better death than die with mocks Which is as bad as die with"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 129
+        }
+      ]
+    },
+    {
+      "session_id": "15850cec-fa6e-4975-8def-29df6b35cd6a",
+      "payloads": [
+        {
+          "prompt": [
+            " BARDOLPH You must away to court sir presently A dozen captains stay at door for you FALSTAFF To the Page Pay the musicians sirrah Farewell hostess farewell Doll You see my good wenches how men of merit are sought after The undeserver may sleep when the"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 126
+        }
+      ]
+    },
+    {
+      "session_id": "da6dc0b4-3658-4917-be96-33bbaf7404bb",
+      "payloads": [
+        {
+          "prompt": [
+            " them again Nay take them Offers the letter again VALENTINE Madam they are for you SILVIA Ay ay you writ them sir at my request But I will none of them They are for you I would have had them writ more movingly VALENTINE Please you Ill write your ladyship another SILV"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 128
+        }
+      ]
+    },
+    {
+      "session_id": "5b6e6972-e441-4346-be00-4bd10a74bb6e",
+      "payloads": [
+        {
+          "prompt": [
+            " have my best gown to make thee a pair and Ill bring thee to the court myself PERICLES Then honour be but a goal to my will This day Ill rise or else add ill to ill Exeunt SCENE II The same A public way or platform leading to the lists A pavilion by the side of it for the"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 124
+        }
+      ]
+    },
+    {
+      "session_id": "da571f94-da29-4bed-881e-b23da151019a",
+      "payloads": [
+        {
+          "prompt": [
+            " of amorous view On the fair Cressid TROILUS Shall I sweet lord be bound to you so much After we part from Agamemnons tent To bring me thither ULYSSES You shall command me sir As gentle tell me of what honour was This Cressida in Troy Had she"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 130
+        }
+      ]
+    },
+    {
+      "session_id": "53d231fb-1e76-483a-8b16-7abb8a1b14d9",
+      "payloads": [
+        {
+          "prompt": [
+            " terror in his look Much more than death Do not say banishment FRIAR LAWRENCE Hence from Verona art thou banished Be patient for the world is broad and wide ROMEO There is no world without Verona walls But purgatory torture hell itself Hence banished is banishd from the world And"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 124
+        }
+      ]
+    },
+    {
+      "session_id": "37eac353-1286-48d3-aa3d-7def1f1128d0",
+      "payloads": [
+        {
+          "prompt": [
+            "ANTINO Sir Proteus you are stayed for PROTEUS Go I come I come Alas this parting strikes poor lovers dumb Exeunt SCENE III The same A street Enter Lance with his dog Crab LANCE Nay twill be this hour ere I have done weeping all the kind of the"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 134
+        }
+      ]
+    },
+    {
+      "session_id": "96a3171a-a25b-436e-b246-f090bea70878",
+      "payloads": [
+        {
+          "prompt": [
+            " for choosing so strong a prop to support so weak a burthen only if your honour seem but pleased I account myself highly praised and vow to take advantage of all idle hours till I have honoured you with some graver labour But if the first heir of my invention prove deformed I shall be sorry it had so noble a godfather and never"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 124
+        }
+      ]
+    },
+    {
+      "session_id": "50bc498a-8dc9-4bd8-b6e8-0de1c46c9948",
+      "payloads": [
+        {
+          "prompt": [
+            " tis certain IAGO Stand you awhile apart Confine yourself but in a patient list Whilst you were here oerwhelmed with your grief A passion most unsuiting such a man Cassio came hither I shifted him away And laid good scuse upon your ecstasy Bade him anon return and here speak with me The"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 123
+        }
+      ]
+    },
+    {
+      "session_id": "c14f855e-ac50-439d-adca-e7c5ce5156db",
+      "payloads": [
+        {
+          "prompt": [
+            " wear rags Do make their children blind But fathers that bear bags Shall see their children kind Fortune that arrant whore Neer turns the key to th poor But for all this thou shalt have as many dolours for thy daughters as thou canst tell in a year LEAR O how this mother swells up"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 129
+        }
+      ]
+    },
+    {
+      "session_id": "717e98d5-5ae6-4b9b-85e8-ab678d3ec426",
+      "payloads": [
+        {
+          "prompt": [
+            " the instruction Enter a man from Antonio SERVANT Gentlemen my master Antonio is at his house and desires to speak with you both SALARINO We have been up and down to seek him Enter Tubal SOLANIO Here comes another of the tribe a third cannot be matchd unless the devil himself turn Jew Exe"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 133
+        }
+      ]
+    },
+    {
+      "session_id": "27fc8202-800c-4703-ad10-a5b765baf7af",
+      "payloads": [
+        {
+          "prompt": [
+            " The same ACT V Scene I The same Dramatis Person SOLINUS Duke of Ephesus EGEON a Merchant of Syracuse ANTIPHOLUS OF EPHESUS Twin brothers and sons to Egeon and ANTIPHOLUS OF SYRACUSE Emilia but unknown to each other DROMIO OF EPHESUS"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 131
+        }
+      ]
+    },
+    {
+      "session_id": "03bd14dd-4d2d-418f-aac8-ba07681078a9",
+      "payloads": [
+        {
+          "prompt": [
+            " Or let me die to look on earth no more QUEEN ELIZABETH Come come my boy We will to sanctuary Madam farewell DUCHESS Stay I will go with you QUEEN ELIZABETH You have no cause ARCHBISHOP To the Queen My gracious lady go And thither bear your treasure"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 129
+        }
+      ]
+    },
+    {
+      "session_id": "677357c7-0ffc-4691-ba17-0bd14b1b4458",
+      "payloads": [
+        {
+          "prompt": [
+            " God is much displeased That you take with unthankfulness His doing In common worldly things tis called ungrateful With dull unwillingness to repay a debt Which with a bounteous hand was kindly lent Much more to be thus opposite with heaven For it requires the royal debt it lent you RIVERS Mad"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 129
+        }
+      ]
+    },
+    {
+      "session_id": "6da37366-881d-47c3-a88c-c95d79ec3968",
+      "payloads": [
+        {
+          "prompt": [
+            " world But let that pass The very all of all isbut sweet heart I do implore secrecythat the King would have me present the Princess sweet chuck with some delightful ostentation or show or pageant or antic or firework Now understanding that the curate and your sweet self are good at such eru"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 127
+        }
+      ]
+    },
+    {
+      "session_id": "a231ce90-12be-4b35-a4b3-df9faae7f2b7",
+      "payloads": [
+        {
+          "prompt": [
+            "man holla A nurses song neer pleasd her babe so well The dire imagination she did follow This sound of hope doth labour to expel 976 For now reviving joy bids her rejoice And flatters her it is Adonis voice Whereat her tears began to turn their tide Being prisond in"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 131
+        }
+      ]
+    },
+    {
+      "session_id": "0cfa2aea-7df8-4256-90dd-e4a56df8f3a9",
+      "payloads": [
+        {
+          "prompt": [
+            " thou flaming minister I can again thy former light restore Should I repent me But once put out thy light Thou cunningst pattern of excelling nature I know not where is that Promethean heat That can thy light relume When I have pluckd thy rose I cannot give it vital growth again It must needs wither Ill smell it"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 127
+        }
+      ]
+    },
+    {
+      "session_id": "58807d12-d75f-4f9f-9ae1-6b89be63d5af",
+      "payloads": [
+        {
+          "prompt": [
+            " grief be lodged in thee When triumph is become an alehouse guest KING RICHARD Join not with grief fair woman do not so To make my end too sudden Learn good soulTo think our former state a happy dream From which awaked the truth of what we are Shows us but this I am sworn brother"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 126
+        }
+      ]
+    },
+    {
+      "session_id": "99b10ffe-eee5-40ea-8388-ec7c9514fddd",
+      "payloads": [
+        {
+          "prompt": [
+            " flesh to be by him cut off Nearest the merchants heart Be merciful Take thrice thy money bid me tear the bond SHYLOCK When it is paid according to the tenour It doth appear you are a worthy judge You know the law your exposition Hath been most sound I charge you by the law"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 130
+        }
+      ]
+    },
+    {
+      "session_id": "ab625781-2e66-48df-b6db-cd0e572de377",
+      "payloads": [
+        {
+          "prompt": [
+            "achus BAWD O abominable BOULT She makes our profession as it were to stink afore the face of the gods BAWD Marry hang her up for ever BOULT The nobleman would have dealt with her like a nobleman and she sent him away as cold as a snowball saying his"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 134
+        }
+      ]
+    },
+    {
+      "session_id": "16cfe398-d891-4c1d-bd56-57ac791a79ff",
+      "payloads": [
+        {
+          "prompt": [
+            " be ploughed MARINA Hark hark you gods BAWD She conjures away with her Would she had never come within my doors Marry hang you Shes born to undo us Will you not go the way of womankind Marry come up my dish of chastity with rosemary and bays Exit BOULT"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 126
+        }
+      ]
+    },
+    {
+      "session_id": "f352d3dd-78ae-4f5f-9b05-3f1a1324a354",
+      "payloads": [
+        {
+          "prompt": [
+            " fathers heart with proud desire Of boldfaced victory Then leaden age Quickend with youthful spleen and warlike rage Beat down Alenon Orleans Burgundy And from the pride of Gallia rescued thee The ireful Bastard Orleans that drew blood From thee my boy and had the maidenhood Of thy first fight I soon"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 126
+        }
+      ]
+    },
+    {
+      "session_id": "ec81a52e-1d2b-4b5a-9634-8c05cd2b230b",
+      "payloads": [
+        {
+          "prompt": [
+            " earth Call not me slanderer Thou and thine usurp The dominations royalties and rights Of this oppressed boy This is thy eldest sons son Infortunate in nothing but in thee Thy sins are visited in this poor child The canon of the law is laid on him Being but the second generation Removed from thy sincon"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 128
+        }
+      ]
+    },
+    {
+      "session_id": "d10a0129-5c1f-45e5-8f18-0501a15f7feb",
+      "payloads": [
+        {
+          "prompt": [
+            " him to our own tents Be but your lordship present at his examination if he do not for the promise of his life and in the highest compulsion of base fear offer to betray you and deliver all the intelligence in his power against you and that with the divine forfeit of his soul upon oath never trust my"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 130
+        }
+      ]
+    },
+    {
+      "session_id": "69f9b7d6-1b7e-40e3-9be5-a87d9d49d1b8",
+      "payloads": [
+        {
+          "prompt": [
+            " strength in measure yet a reasonable measure in strength If I could win a lady at leapfrog or by vaulting into my saddle with my armour on my back under the correction of bragging be it spoken I should quickly leap into a wife Or if I might buffet for my love or bound my horse for her favours I could"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 125
+        }
+      ]
+    },
+    {
+      "session_id": "0977d903-1ada-40e7-a725-55453b06985b",
+      "payloads": [
+        {
+          "prompt": [
+            "apping gentle love And have forsworn you with Hortensio BIANCA Tranio you jest but have you both forsworn me TRANIO Mistress we have LUCENTIO Then we are rid of Licio TRANIO I faith hell have a lusty widow now That shall be wood and wedded in a"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 131
+        }
+      ]
+    },
+    {
+      "session_id": "9fd14d83-e611-4424-9bad-c74c304ac1e7",
+      "payloads": [
+        {
+          "prompt": [
+            " image neer shall go My sighing breast shall be thy funeral bell And so obsequious will thy father be Even for the loss of thee having no more As Priam was for all his valiant sons Ill bear thee hence and let them fight that will For I have murdered where I should not kill Exit with the body"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 134
+        }
+      ]
+    },
+    {
+      "session_id": "7b684d49-e384-40a0-804e-1b3dfc18f799",
+      "payloads": [
+        {
+          "prompt": [
+            " CLARENCE brother to the King DUKE OF BEDFORD brother to the King DUKE OF GLOUCESTER brother to the King DUKE OF EXETER uncle to the King DUKE OF YORK cousin to the King EARL OF SALISBURY EARL OF HUNTINGDON EARL OF WESTM"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 130
+        }
+      ]
+    },
+    {
+      "session_id": "64e3aec9-b512-473a-adea-3df47deaecb6",
+      "payloads": [
+        {
+          "prompt": [
+            " the right of that We all have strongly sworn to give him aid And let him never see joy that breaks that oath YORK Well well I see the issue of these arms I cannot mend it I must needs confess Because my power is weak and all illleft But if I could by Him that gave me life I would"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 131
+        }
+      ]
+    },
+    {
+      "session_id": "07469149-2561-41f9-b51e-99400495150c",
+      "payloads": [
+        {
+          "prompt": [
+            " itself in a fog where being three parts melted away with rotten dews the fourth would return for conscience sake to help to get thee a wife SECOND CITIZEN You are never without your tricks You may you may THIRD CITIZEN Are you all resolved to give your voices But thats no matter the greater part carries"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 135
+        }
+      ]
+    },
+    {
+      "session_id": "ae559fae-7fde-4ce7-8c58-b09542acbfb6",
+      "payloads": [
+        {
+          "prompt": [
+            " am the daughter to King Pericles If good King Pericles be PERICLES Ho Helicanus Enter Helicanus and Lysimachus HELICANUS Calls my lord PERICLES Thou art a grave and noble counsellor Most wise in general tell me if thou canst What this maid is or what"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 128
+        }
+      ]
+    },
+    {
+      "session_id": "303ef95f-ff8a-4afa-9b23-bccaacd1bf23",
+      "payloads": [
+        {
+          "prompt": [
+            " me Richer than wealth prouder than garments costs Of more delight than hawks and horses be And having thee of all mens pride I boast Wretched in this alone that thou mayst take All this away and me most wretched make 92 But do thy worst to steal thyself away For term of life thou art assured"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 129
+        }
+      ]
+    },
+    {
+      "session_id": "68310bc6-d65e-4485-8546-38dd082e1295",
+      "payloads": [
+        {
+          "prompt": [
+            " other oath Than honesty to honesty engagd That this shall be or we will fall for it Swear priests and cowards and men cautelous Old feeble carrions and such suffering souls That welcome wrongs unto bad causes swear Such creatures as men doubt but do not stain The"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 118
+        }
+      ]
+    },
+    {
+      "session_id": "1bc47a52-130b-4979-ac8f-6edc0dc90130",
+      "payloads": [
+        {
+          "prompt": [
+            " lets seet For the Lord Timon sir JEWELLER If he will touch the estimate But for that POET When we for recompense have praised the vile It stains the glory in that happy verse Which aptly sings the good MERCHANT Looking at the jewel Tis a good form JEWELLER And rich Here is a water look"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 132
+        }
+      ]
+    },
+    {
+      "session_id": "33214d62-32f6-43d6-acca-cf03373805b8",
+      "payloads": [
+        {
+          "prompt": [
+            " will you stand by us RICHARD Ay in despite of all that shall withstand you KING EDWARD Why so Then am I sure of victory Now therefore let us hence and lose no hour Till we meet Warwick with his foreign power Exeunt SCENE II A Plain in Warwickshire Enter Warwick and Oxford in"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 127
+        }
+      ]
+    },
+    {
+      "session_id": "526e2c5f-2251-4065-b08f-4be9677c0e3f",
+      "payloads": [
+        {
+          "prompt": [
+            " servd all Would sing her song and dance her turn now here At upper end o th table now i th middle On his shoulder and his her face o fire With labour and the thing she took to quench it She would to each one sip You are retired As if you were a feasted one and not"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 127
+        }
+      ]
+    },
+    {
+      "session_id": "7f3e3efd-c7c1-4961-9a4f-2edb7a2c3a5a",
+      "payloads": [
+        {
+          "prompt": [
+            " if not thou art an Hebrew a Jew and not worth the name of a Christian SPEED Why LANCE Because thou hast not so much charity in thee as to go to the ale with a Christian Wilt thou go SPEED At thy service Exeunt SCENE VI The same The Dukes palace Enter Proteus alone PROTEUS To"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 127
+        }
+      ]
+    },
+    {
+      "session_id": "dc4cc285-6895-4e8c-95af-32019836c927",
+      "payloads": [
+        {
+          "prompt": [
+            " We shall hear music wit and oracle ULYSSES Troy yet upon his basis had been down And the great Hectors sword had lackd a master But for these instances The specialty of rule hath been neglected And look how many Grecian tents do stand Hollow upon this plain so many hollow factions When that the general"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 133
+        }
+      ]
+    },
+    {
+      "session_id": "25031728-3ca3-4bee-82c8-6e2b88d7c0e2",
+      "payloads": [
+        {
+          "prompt": [
+            " as his father here was conqueror As sure as in this latebetrayed town Great Coeurdelions heart was buried So sure I swear to get the town or die BURGUNDY My vows are equal partners with thy vows TALBOT But ere we go regard this dying prince The val"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 127
+        }
+      ]
+    },
+    {
+      "session_id": "58b6ffa4-dc06-4f42-a3db-e0987e9b83aa",
+      "payloads": [
+        {
+          "prompt": [
+            "ence to a second day of audience When you are hearing a matter between party and party if you chance to be pinched with the colic you make faces like mummers set up the bloody flag against all patience and in roaring for a chamber pot dismiss the controversy bleeding the more entangled by"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 130
+        }
+      ]
+    },
+    {
+      "session_id": "ba2c01af-a180-42e4-9668-1e266697e9af",
+      "payloads": [
+        {
+          "prompt": [
+            " fed Of that self blood that first gave life to you And from your womb where you imprisoned were He is enfranchised and come to light Nay he is your brother by the surer side Although my seal be stamped in his face NURSE Aaron what shall I say unto the empress DEMETRIUS Adv"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 129
+        }
+      ]
+    },
+    {
+      "session_id": "0ed6e765-ba6d-4319-b09c-7de33ca6d060",
+      "payloads": [
+        {
+          "prompt": [
+            " catechize the world for him that is make questions and by them answer DESDEMONA Seek him bid him come hither Tell him I have moved my lord on his behalf and hope all will be well CLOWN To do this is within the compass of mans wit and therefore I will attempt the doing it Exit"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 131
+        }
+      ]
+    },
+    {
+      "session_id": "e2b0c2f7-f946-4717-8e51-acae68cbe3be",
+      "payloads": [
+        {
+          "prompt": [
+            " but to the summer And not a man for being simply man Hath any honour but honour for those honours That are without him as place riches and favour Prizes of accident as oft as merit Which when they fall as being slippery standers The love that leand on them as slippery too Doth"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 128
+        }
+      ]
+    },
+    {
+      "session_id": "e5a58390-21d9-447a-91dd-844d1ccad641",
+      "payloads": [
+        {
+          "prompt": [
+            " by his subornation Upon my life began her devilish practices Or if he were not privy to those faults Yet by reputing of his high descent As next the King he was successive heir And such high vaunts of his nobility Did instigate the bedlam brainsick Duchess By wicked means to frame our sovereigns fall"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 121
+        }
+      ]
+    },
+    {
+      "session_id": "134b0966-8eb7-472d-b090-11d984251e0c",
+      "payloads": [
+        {
+          "prompt": [
+            " the branches when the root is gone Why wither not the leaves that want their sap If you will live lament if die be brief That our swiftwinged souls may catch the Kings Or like obedient subjects follow him To his new kingdom of neerchanging night DUCHESS Ah so much interest have I"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 134
+        }
+      ]
+    },
+    {
+      "session_id": "27db0acc-0289-4034-8071-d8052527a2cd",
+      "payloads": [
+        {
+          "prompt": [
+            " stones well fall to it with our teeth SECOND SERVINGMAN Do what ye dare we are as resolute Skirmish again GLOUCESTER You of my household leave this peevish broil And set this unaccustomd fight aside THIRD SERVING"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 131
+        }
+      ]
+    },
+    {
+      "session_id": "fa9fc17d-0a96-4f45-b2ad-46df2e83114c",
+      "payloads": [
+        {
+          "prompt": [
+            "th flow She is the weeping welkin I the earth Then must my sea be moved with her sighs Then must my earth with her continual tears Become a deluge overflowed and drowned For why my bowels cannot hide her woes But like a drunkard must I vomit them Then give me leave for losers will have leave To ease"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 125
+        }
+      ]
+    },
+    {
+      "session_id": "466343e4-11d6-400c-8ea9-e1f7121c192b",
+      "payloads": [
+        {
+          "prompt": [
+            " haggard check at every feather That comes before his eye This is a practice As full of labour as a wise mans art For folly that he wisely shows is fit But wise men follyfalln quite taint their wit Enter Sir Toby and Sir Andrew SIR TOBY Save you gentleman VIOLA And you sir SIR ANDREW Die"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 124
+        }
+      ]
+    },
+    {
+      "session_id": "b364baff-d2e9-4999-a45b-2d1bc2638a69",
+      "payloads": [
+        {
+          "prompt": [
+            "ISTRESS FORD A plain kerchief Sir John My brows become nothing else nor that well neither FALSTAFF By the Lord thou art a traitor to say so Thou wouldst make an absolute courtier and the firm fixture of thy foot would give an excellent motion to thy gait in a semicircled far"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 130
+        }
+      ]
+    },
+    {
+      "session_id": "2d323450-1acf-4fe0-9b90-1e14a981a301",
+      "payloads": [
+        {
+          "prompt": [
+            " the thing I know not It were as possible for me to say I loved nothing so well as you but believe me not and yet I lie not I confess nothing nor I deny nothing I am sorry for my cousin BENEDICK By my sword Beatrice thou lovest me BEATRICE Do not swear by it and eat it BEN"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 129
+        }
+      ]
+    },
+    {
+      "session_id": "8397d7db-60ba-454d-a660-eabbabcf196f",
+      "payloads": [
+        {
+          "prompt": [
+            " you MIRANDA At mine unworthiness that dare not offer What I desire to give and much less take What I shall die to want But this is trifling And all the more it seeks to hide itself The bigger bulk it shows Hence bashful cunning And prompt me plain and holy innocence I am your wife if you will"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 132
+        }
+      ]
+    },
+    {
+      "session_id": "3827c07d-b884-4691-8eeb-64ffd9ff3b3d",
+      "payloads": [
+        {
+          "prompt": [
+            " we fought I doubt we should have been too young for them BENEDICK In a false quarrel there is no true valour I came to seek you both CLAUDIO We have been up and down to seek thee for we are highproof melancholy and would fain have it beaten away Wilt thou"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 131
+        }
+      ]
+    },
+    {
+      "session_id": "0918150f-12d9-4c08-b2bf-524ad192fe24",
+      "payloads": [
+        {
+          "prompt": [
+            " she sighd and bade me come tomorrow Were I with her the night would post too soon But now are minutes added to the hours To spite me now each minute seems a moon Yet not for me shine sun to succour flowers Pack night peep day good day of night now borrow Short night tonight and length thyself tomorrow XV"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 127
+        }
+      ]
+    },
+    {
+      "session_id": "4408a743-9a22-43fc-9d4b-6ef97428897e",
+      "payloads": [
+        {
+          "prompt": [
+            " Tis impossible CLEOPATRA I think so Charmian dull of tongue and dwarfish What majesty is in her gait Remember If eer thou lookdst on majesty MESSENGER She creeps Her motion and her station are as one She shows a body rather than a life A statue than a breather"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 125
+        }
+      ]
+    },
+    {
+      "session_id": "a85bc1d6-cf32-4040-b01c-d8eaf6604cdd",
+      "payloads": [
+        {
+          "prompt": [
+            " company OBERON Tarry rash wanton am not I thy lord TITANIA Then I must be thy lady but I know When thou hast stoln away from fairyland And in the shape of Corin sat all day Playing on pipes of corn and versing love To amorous Phillida Why art thou"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 129
+        }
+      ]
+    },
+    {
+      "session_id": "9a083883-3771-4b5c-afb9-e8a2af58b3a5",
+      "payloads": [
+        {
+          "prompt": [
+            " breeching scholar in the schools Ill not be tied to hours nor pointed times But learn my lessons as I please myself And to cut off all strife here sit we down Take you your instrument play you the whiles His lecture will be done ere you have tund HORTENSIO Youll leave his lecture when I am in"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 120
+        }
+      ]
+    },
+    {
+      "session_id": "0b1d6b20-83c6-4085-90b6-d919c9b61808",
+      "payloads": [
+        {
+          "prompt": [
+            " me you mean PETRUCHIO Alas good Kate I will not burden thee For knowing thee to be but young and light KATHERINA Too light for such a swain as you to catch And yet as heavy as my weight should be PETRUCHIO Should be should buz"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 124
+        }
+      ]
+    },
+    {
+      "session_id": "0165974c-edc4-44a0-98dc-87830e5f169c",
+      "payloads": [
+        {
+          "prompt": [
+            " I a coward Who calls me villain breaks my pate across Plucks off my beard and blows it in my face Tweaks me by the nose gives me the lie i th throat As deep as to the lungs Who does me this Ha Swounds I should take it for it cannot be But"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 129
+        }
+      ]
+    },
+    {
+      "session_id": "5753b46c-3186-4a50-b2da-b8aa585af326",
+      "payloads": [
+        {
+          "prompt": [
+            " unborn shall bless my ashes ARCITE If she refuse me yet my grave will wed me And soldiers sing my epitaph THESEUS Make choice then EMILIA I cannot sir they are both too excellent For me a hair shall never fall of these men HIPPOLYTA What will become of em THESEUS Thus I"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 128
+        }
+      ]
+    },
+    {
+      "session_id": "e848abb0-28b0-4aae-8da2-c81855810589",
+      "payloads": [
+        {
+          "prompt": [
+            " Lady There dwelt a man in Babylon Lady Lady CLOWN Beshrew me the knights in admirable fooling SIR ANDREW Ay he does well enough if he be disposed and so do I too he does it with a better grace but I do it more natural SIR TOBY Sings O the twelfth day of December MARIA For"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 132
+        }
+      ]
+    },
+    {
+      "session_id": "e3787dd5-0161-43d1-9029-ba6a4a694536",
+      "payloads": [
+        {
+          "prompt": [
+            " And cried All hail when as he meant all harm KING EDWARD Now am I seated as my soul delights Having my countrys peace and brothers loves GEORGE What will your Grace have done with Margaret Reignier her father to the King of France Hath pawned the Sicils and Jerusalem And hither have they sent"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 131
+        }
+      ]
+    },
+    {
+      "session_id": "c0655b90-50ba-4029-a3ab-41144f704f6e",
+      "payloads": [
+        {
+          "prompt": [
+            " when you did feast Suspect still comes where an estate is least That which I show heaven knows is merely love Duty and zeal to your unmatched mind Care of your food and living And believe it My most honoured lord For any benefit that points to me Either in hope or present Id exchange For this one wish that you had"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 126
+        }
+      ]
+    },
+    {
+      "session_id": "abffb810-bad8-4a5a-ad69-6a29a6b4c39a",
+      "payloads": [
+        {
+          "prompt": [
+            " hereafter it may compel him to her recompense and here by this is your brother saved your honour untainted the poor Mariana advantaged and the corrupt deputy scaled The maid will I frame and make fit for his attempt If you think well to carry this as you may the doubleness of the benefit defends the deceit from reproof What think"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 125
+        }
+      ]
+    },
+    {
+      "session_id": "95cceb6f-d910-4c11-bc01-1bb1dfd11956",
+      "payloads": [
+        {
+          "prompt": [
+            " see yonder the beginning of the day but I think we shall never see the end of it Who goes there KING HENRY A friend WILLIAMS Under what captain serve you KING HENRY Under Sir Thomas Erpingham WILLIAMS A good old commander and a most kind gentleman I pray you what thinks he of our estate"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 126
+        }
+      ]
+    },
+    {
+      "session_id": "8143a243-ad33-4bbf-b5ba-b2e97f789a12",
+      "payloads": [
+        {
+          "prompt": [
+            " weary with disasters tuggd with fortune That I would set my life on any chance To mend it or be rid ont MACBETH Both of you Know Banquo was your enemy BOTH MURDERERS True my lord MACBETH So is he mine and in such bloody distance That every minute of his being"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 126
+        }
+      ]
+    },
+    {
+      "session_id": "a8cf0127-7070-4a19-937b-567632fd398c",
+      "payloads": [
+        {
+          "prompt": [
+            " I will wrong such honourable men But heres a parchment with the seal of Caesar I found it in his closet tis his will Let but the commons hear this testament Which pardon me I do not mean to read And they would go and kiss dead Caesars wounds And dip their napkins in his sacred blood"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 133
+        }
+      ]
+    },
+    {
+      "session_id": "91cf072e-ad1c-440c-a32a-ce03ffa8dc27",
+      "payloads": [
+        {
+          "prompt": [
+            " who To thee What art thou Have not I An arm as big as thine a heart as big Thy words I grant are bigger for I wear not My dagger in my mouth Say what thou art Why I should yield to thee CLOTEN Thou villain base Knowst me not by my clothes GUIDERIUS No"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 130
+        }
+      ]
+    },
+    {
+      "session_id": "31328cdd-b973-46ed-909b-d1ec588dd4d6",
+      "payloads": [
+        {
+          "prompt": [
+            " and weakened Hath Bolingbroke Deposed thine intellect Hath he been in thy heart The lion dying thrusteth forth his paw And wounds the earth if nothing else with rage To be oerpowered and wilt thou pupillike Take the correction mildly kiss the rod And fawn on rage with base humility Which art"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 131
+        }
+      ]
+    },
+    {
+      "session_id": "2abbb0ce-7114-41b3-b8eb-04a6fc9cb6b5",
+      "payloads": [
+        {
+          "prompt": [
+            " FALSTAFF Let it alone Ill make other shift youll be a fool still HOSTESS Well you shall have it though I pawn my gown I hope youll come to supper Youll pay me all together FALSTAFF Will I live To Bardolph Go with her with her Hook on hook on HOST"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 125
+        }
+      ]
+    },
+    {
+      "session_id": "bcff54b2-7bdc-46ae-8e6d-f144d63488b1",
+      "payloads": [
+        {
+          "prompt": [
+            " And that in way of cautionI must tell you You do not understand yourself so clearly As it behoves my daughter and your honour What is between you Give me up the truth OPHELIA He hath my lord of late made many tenders Of his affection to me POLONIUS Affection Pooh You"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 128
+        }
+      ]
+    },
+    {
+      "session_id": "c8b658b3-bee6-4a2a-b7d4-f9d6ebc58853",
+      "payloads": [
+        {
+          "prompt": [
+            " Who in this kind of merry fooling am nothing to you So you may continue and laugh at nothing still ANTONIO What a blow was there given SEBASTIAN An it had not fallen flatlong GONZALO You are gentlemen of brave mettle You would lift the moon"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 132
+        }
+      ]
+    },
+    {
+      "session_id": "38fd7a9a-df27-48f2-b7c3-4e469de4eb9c",
+      "payloads": [
+        {
+          "prompt": [
+            " school the book Where subjects eyes do learn do read do look And wilt thou be the school where Lust shall learn Must he in thee read lectures of such shame Wilt thou be glass wherein it shall discern Authority for sin warrant for blame To privilege dishonour in thy name Thou backst reproach against longliving laud And makst fair reputation"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 130
+        }
+      ]
+    },
+    {
+      "session_id": "3ee46983-d658-481d-983f-d6b2c4e6e80f",
+      "payloads": [
+        {
+          "prompt": [
+            " sweet stem from Yorks great stock Why didst thou say of late thou wert despised PLANTAGENET First lean thine aged back against mine arm And in that ease Ill tell thee my disease This day in argument upon a case Some words there grew twixt Somerset and me Among which terms"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 127
+        }
+      ]
+    },
+    {
+      "session_id": "06610607-f49e-4dbc-884d-329969144c0d",
+      "payloads": [
+        {
+          "prompt": [
+            " That grudge one thought against your Majesty ALL Welcome high prince the mighty Duke of York SOMERSET Aside Perish base prince ignoble Duke of York GLOUCESTER Now will it best avail your Majesty To cross the seas and to be crownd in France The presence of a king engenders love Among"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 120
+        }
+      ]
+    },
+    {
+      "session_id": "44db61d2-86b8-4d23-9b9b-a3826c171944",
+      "payloads": [
+        {
+          "prompt": [
+            " was PRINCESS And were you well advised KING I was fair madam PRINCESS When you then were here What did you whisper in your ladys ear KING That more than all the world I did respect her PRINCESS When she shall challenge this you will reject her KING Upon mine honour no PRINCESS Peace peace forbear Your oath once broke"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 134
+        }
+      ]
+    },
+    {
+      "session_id": "d431eda8-208d-4f84-856c-401ac68793b3",
+      "payloads": [
+        {
+          "prompt": [
+            " TOBY Come on there is sixpence for you Lets have a song SIR ANDREW Theres a testril of me too if one knight give a CLOWN Would you have a lovesong or a song of good life SIR TOBY A lovesong a lovesong SIR ANDREW Ay ay I care"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 129
+        }
+      ]
+    },
+    {
+      "session_id": "139442f9-d5cd-47ab-a07d-c0bd69364db8",
+      "payloads": [
+        {
+          "prompt": [
+            " strange than true I never may believe These antique fables nor these fairy toys Lovers and madmen have such seething brains Such shaping fantasies that apprehend More than cool reason ever comprehends The lunatic the lover and the poet Are of imagination all compact One sees more devils than vast hell can hold That is the madman"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 136
+        }
+      ]
+    },
+    {
+      "session_id": "d4bced58-72c6-47a1-aa9a-df0186e79f78",
+      "payloads": [
+        {
+          "prompt": [
+            " Veronese family at feud with the Montagues LADY CAPULET wife to Capulet JULIET daughter to Capulet TYBALT nephew to Lady Capulet CAPULETS COUSIN an old man NURSE to Juliet PETER servant to Juliets Nurse SAMPSON servant to Capulet GREGORY"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 127
+        }
+      ]
+    },
+    {
+      "session_id": "2d5efaec-a564-4e37-a67e-b374e0edfd99",
+      "payloads": [
+        {
+          "prompt": [
+            "CE EDWARD Nay mark how Lewis stamps as he were nettled I hope alls for the best KING LEWIS Warwick what are thy news And yours fair Queen QUEEN MARGARET Mine such as fill my heart with unhoped joys WARWICK Mine full of sorrow and hearts discontent KING LE"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 129
+        }
+      ]
+    },
+    {
+      "session_id": "c32e98cf-e0c5-4bd2-b07b-5815a16de696",
+      "payloads": [
+        {
+          "prompt": [
+            " She clepes him king of graves and grave for kings Imperious supreme of all mortal things 996 No no quoth she sweet death I did but jest Yet pardon me I felt a kind of fear Whenas I met the boar that bloody beast Which knows no pity but is still severe 100"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 128
+        }
+      ]
+    },
+    {
+      "session_id": "71beb956-1142-4e5f-8060-6eb65befdc4b",
+      "payloads": [
+        {
+          "prompt": [
+            " see aught in you that makes him like That anything he sees which moves his liking I can with ease translate it to my will Or if you will to speak more properly I will enforce it easly to my love Further I will not flatter you my lord That all I see in you is worthy love Than this that nothing do I see in"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 125
+        }
+      ]
+    },
+    {
+      "session_id": "98ad3238-c86d-412b-b04c-1204de0d75b9",
+      "payloads": [
+        {
+          "prompt": [
+            " thee this night a torchbearer And light thee on thy way to Mantua Therefore stay yet thou needst not to be gone ROMEO Let me be taen let me be put to death I am content so thou wilt have it so Ill say yon grey is not the mornings eye Tis but the pale reflex of Cynth"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 131
+        }
+      ]
+    },
+    {
+      "session_id": "6e61f8a9-7808-4807-998e-8c1a281157d7",
+      "payloads": [
+        {
+          "prompt": [
+            " And pause us till these rebels now afoot Come underneath the yoke of government WARWICK Both which we doubt not but your Majesty Shall soon enjoy KING Humphrey my son of Gloucester Where is the Prince your brother GLOUCESTER I think hes gone to hunt my lord at Windsor KING And how accompanied GLOUCESTER I"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 132
+        }
+      ]
+    },
+    {
+      "session_id": "25ff0ff4-e09a-48d7-a0a7-76b12c1d95ac",
+      "payloads": [
+        {
+          "prompt": [
+            " Terms names Amaimon sounds well Lucifer well Barbason well yet they are devils additions the names of fiends But cuckold Wittol Cuckold The devil himself hath not such a name Page is an ass a secure ass he will trust his wife he will not be jealous I will rather trust a Fleming with my butter Parson Hugh the Welsh"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 130
+        }
+      ]
+    },
+    {
+      "session_id": "d97b9984-f9ee-4437-88f8-c05e2876ac89",
+      "payloads": [
+        {
+          "prompt": [
+            " lie with love and love with me Since that our faults in love thus smotherd be II Two loves I have of comfort and despair That like two spirits do suggest me still My better angel is a man right fair My worser spirit a woman colourd ill To win me soon to hell my female evil Tempteth my better angel from my side"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 126
+        }
+      ]
+    },
+    {
+      "session_id": "9a9c074f-140d-4541-91c5-8bc63ed42562",
+      "payloads": [
+        {
+          "prompt": [
+            "rows to feed upon Exit ACT V SCENE I Fields between Dartford and Blackheath Enter York and his army of Irish with drum and colours YORK From Ireland thus comes York to claim his right And pluck the crown from feeble Henrys head Ring bells aloud burn bonfires clear and bright To entertain great Eng"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 130
+        }
+      ]
+    },
+    {
+      "session_id": "aca24e4f-9cc4-41aa-8531-692203f159c1",
+      "payloads": [
+        {
+          "prompt": [
+            " foot And spurn upon thee beggar for thy boldness They set down the bier ANNE What do you tremble Are you all afraid Alas I blame you not for you are mortal And mortal eyes cannot endure the devil Avaunt thou dreadful minister of hell Thou hadst but power over his mortal"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 123
+        }
+      ]
+    },
+    {
+      "session_id": "74c764eb-9670-4eef-91fa-a38fe1ff85af",
+      "payloads": [
+        {
+          "prompt": [
+            " Joseph Nicholas Philip Walter Sugarsop and the rest let their heads be sleekly combed their blue coats brushd and their garters of an indifferent knit let them curtsy with their left legs and not presume to touch a hair of my masters horsetail till they kiss their hands Are they all ready CURTIS They"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 131
+        }
+      ]
+    },
+    {
+      "session_id": "a27b1570-2e17-458d-92c4-6e1235fb7d29",
+      "payloads": [
+        {
+          "prompt": [
+            " had eaten thee Dost thou deny thy father cursed drab O burn her burn her Hanging is too good Exit YORK Take her away for she hath lived too long To fill the world with vicious qualities PUCELLE First let me tell you whom you have condemnd Not one begotten of a shepherd swain But issued from the progeny of kings Virt"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 135
+        }
+      ]
+    },
+    {
+      "session_id": "dc437983-f910-497c-b035-83a8dfe7346e",
+      "payloads": [
+        {
+          "prompt": [
+            " sun to sun There is my honours pawn Engage it to the trial if thou darst AUMERLE Who sets me else By heaven Ill throw at all I have a thousand spirits in one breast To answer twenty thousand such as you SURREY My Lord Fitzwater I do remember well The very time A"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 128
+        }
+      ]
+    },
+    {
+      "session_id": "b4246780-9468-400e-9551-ec039d827599",
+      "payloads": [
+        {
+          "prompt": [
+            "stuffd brain Doth couch his limbs there golden sleep doth reign Therefore thy earliness doth me assure Thou art uprousd with some distemperature Or if not so then here I hit it right Our Romeo hath not been in bed tonight ROMEO That last is true the sweeter rest was"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 130
+        }
+      ]
+    },
+    {
+      "session_id": "a03b1575-2434-4c03-a746-7922bebb0e15",
+      "payloads": [
+        {
+          "prompt": [
+            " from us we were free Csars ambition Which swelld so much that it did almost stretch The sides o th world against all colour here Did put the yoke upons which to shake off Becomes a warlike people whom we reckon Ourselves to be CLOTEN We do CYMBELINE Say then to Csar Our ancestor was"
+          ],
+          "model": "Qwen/Qwen3-0.6B",
+          "stream": false,
+          "max_tokens": 124
+        }
+      ]
+    }
+  ]
+}

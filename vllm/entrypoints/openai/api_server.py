@@ -623,15 +623,77 @@ def _load_prefix_warmup_bytes(location: str) -> bytes:
         raise RuntimeError(f"Prefix warmup file not found: {location}") from e
 
 
+def _validate_prefix_warmup_entry(entry: object, idx: int) -> dict:
+    if not isinstance(entry, dict):
+        raise RuntimeError(
+            f"Prefix warmup entry #{idx} must be a JSON object, got "
+            f"{type(entry).__name__}"
+        )
+    messages = entry.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise RuntimeError(
+            f"Prefix warmup entry #{idx} must have a non-empty 'messages' list"
+        )
+    return entry
+
+
+def _build_prefix_warmup_request(
+    entry: dict, idx: int, served_model_name: str
+) -> ChatCompletionRequest:
+    request_kwargs = dict(entry)
+    request_kwargs.setdefault("max_tokens", 1)
+    request_kwargs["model"] = served_model_name
+    request_kwargs["stream"] = False
+    request_kwargs["request_id"] = f"prefix-warmup-{idx}"
+    try:
+        return ChatCompletionRequest(**request_kwargs)
+    except Exception as e:
+        raise RuntimeError(
+            f"Prefix warmup entry #{idx} is not a valid chat request: {e}"
+        ) from e
+
+
+async def _run_prefix_warmup_entry(
+    chat_handler: Any,
+    entry: dict,
+    idx: int,
+    served_model_name: str,
+    total: int,
+) -> None:
+    request = _build_prefix_warmup_request(entry, idx, served_model_name)
+    result = await chat_handler.create_chat_completion(request, raw_request=None)
+
+    if isinstance(result, ErrorResponse):
+        raise RuntimeError(
+            f"Prefix warmup request #{idx} failed: {result.error.message} "
+            f"(code={result.error.code})"
+        )
+    if not isinstance(result, ChatCompletionResponse):
+        raise RuntimeError(
+            f"Prefix warmup request #{idx} returned unexpected type "
+            f"{type(result).__name__}; expected ChatCompletionResponse."
+        )
+
+    usage = getattr(result, "usage", None)
+    logger.info(
+        "Prefix warmup request #%d/%d primed (prompt_tokens=%s)",
+        idx + 1,
+        total,
+        getattr(usage, "prompt_tokens", "?"),
+    )
+
+
 async def run_prefix_warmup(state: State, args: Namespace) -> None:
     """Prime the prefix/KV cache by running chat warmup requests.
 
     Reads ``args.prefix_warmup_file`` (a JSON list of chat-completion-style
     requests) and runs each one through the same chat serving handler used for
     real traffic, so the chat template and tokenization match exactly. The flag
-    accepts a local path, an http(s) URL, or an s3:// URL. This runs before
-    ``serve_http``, so ``/health`` is not yet reachable. Any failure raises
-    ``RuntimeError`` and aborts server startup (fatal).
+    accepts a local path or an http(s) URL. Use ``args.prefix_warmup_count`` to
+    run only the first N entries, and ``args.prefix_warmup_parallel`` to run them
+    concurrently. This runs before ``serve_http``, so ``/health`` is not yet
+    reachable. Any failure raises ``RuntimeError`` and aborts server startup
+    (fatal).
     """
     warmup_path = getattr(args, "prefix_warmup_file", None)
     if not warmup_path:
@@ -664,59 +726,47 @@ async def run_prefix_warmup(state: State, args: Namespace) -> None:
         )
         return
 
+    warmup_count = getattr(args, "prefix_warmup_count", None)
+    if warmup_count is not None:
+        if warmup_count <= 0:
+            logger.warning(
+                "Prefix warmup count %d is not positive; nothing to warm up.",
+                warmup_count,
+            )
+            return
+        entries = entries[:warmup_count]
+
+    run_parallel = bool(getattr(args, "prefix_warmup_parallel", False))
     served_model_name = state.openai_serving_models.base_model_paths[0].name
+    total = len(entries)
 
     logger.info(
-        "Running prefix warmup: %d request(s) from %s", len(entries), warmup_path
+        "Running prefix warmup: %d request(s) from %s (%s)",
+        total,
+        warmup_path,
+        "parallel" if run_parallel else "sequential",
     )
 
-    for idx, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            raise RuntimeError(
-                f"Prefix warmup entry #{idx} must be a JSON object, got "
-                f"{type(entry).__name__}"
-            )
-        messages = entry.get("messages")
-        if not isinstance(messages, list) or not messages:
-            raise RuntimeError(
-                f"Prefix warmup entry #{idx} must have a non-empty 'messages' list"
-            )
+    validated = [
+        _validate_prefix_warmup_entry(entry, idx) for idx, entry in enumerate(entries)
+    ]
 
-        request_kwargs = dict(entry)
-        request_kwargs.setdefault("max_tokens", 1)
-        request_kwargs["model"] = served_model_name
-        request_kwargs["stream"] = False
-        request_kwargs["request_id"] = f"prefix-warmup-{idx}"
-
-        try:
-            request = ChatCompletionRequest(**request_kwargs)
-        except Exception as e:
-            raise RuntimeError(
-                f"Prefix warmup entry #{idx} is not a valid chat request: {e}"
-            ) from e
-
-        result = await chat_handler.create_chat_completion(request, raw_request=None)
-
-        if isinstance(result, ErrorResponse):
-            raise RuntimeError(
-                f"Prefix warmup request #{idx} failed: {result.error.message} "
-                f"(code={result.error.code})"
-            )
-        if not isinstance(result, ChatCompletionResponse):
-            raise RuntimeError(
-                f"Prefix warmup request #{idx} returned unexpected type "
-                f"{type(result).__name__}; expected ChatCompletionResponse."
-            )
-
-        usage = getattr(result, "usage", None)
-        logger.info(
-            "Prefix warmup request #%d/%d primed (prompt_tokens=%s)",
-            idx + 1,
-            len(entries),
-            getattr(usage, "prompt_tokens", "?"),
+    if run_parallel:
+        await asyncio.gather(
+            *[
+                _run_prefix_warmup_entry(
+                    chat_handler, entry, idx, served_model_name, total
+                )
+                for idx, entry in enumerate(validated)
+            ]
         )
+    else:
+        for idx, entry in enumerate(validated):
+            await _run_prefix_warmup_entry(
+                chat_handler, entry, idx, served_model_name, total
+            )
 
-    logger.info("Prefix warmup complete: %d request(s) primed.", len(entries))
+    logger.info("Prefix warmup complete: %d request(s) primed.", total)
 
 
 async def build_and_serve(
