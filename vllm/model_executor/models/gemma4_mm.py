@@ -357,7 +357,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         token_ids = (
             [config.boa_token_id]
             + [processor.audio_token_id] * num_tokens
-            + [config.eoa_token_id]
+            + [getattr(config, "eoa_token_id", config.eoa_token_index)]
         )
         return PromptUpdateDetails.select_token_id(token_ids, processor.audio_token_id)
 
