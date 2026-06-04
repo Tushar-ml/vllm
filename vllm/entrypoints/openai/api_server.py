@@ -3,17 +3,20 @@
 import asyncio
 import importlib
 import inspect
+import json
 import multiprocessing
 import multiprocessing.forkserver as forkserver
 import os
 import signal
 import socket
 import tempfile
+import urllib.request
 import warnings
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import urlparse
 
 import uvloop
 from fastapi import FastAPI, HTTPException
@@ -27,8 +30,13 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
+from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+)
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.engine.protocol import GenerationError
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse, GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
@@ -554,6 +562,178 @@ def setup_server(args):
     return listen_address, sock
 
 
+def _load_prefix_warmup_bytes(location: str) -> bytes:
+    """Load the raw warmup-file bytes from a local path or an http(s) URL.
+
+    The scheme of ``location`` selects the loader: ``http``/``https`` download via
+    urllib (use a presigned URL to fetch from object stores such as S3 without
+    credentials on the host), anything else is treated as a local filesystem
+    path. Failures raise ``RuntimeError`` so startup aborts.
+    """
+    scheme = urlparse(location).scheme.lower()
+
+    if scheme in ("http", "https"):
+        try:
+            with urllib.request.urlopen(location, timeout=30) as resp:
+                return resp.read()
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to download prefix warmup file from {location}: {e}"
+            ) from e
+
+    try:
+        with open(location, "rb") as f:
+            return f.read()
+    except FileNotFoundError as e:
+        raise RuntimeError(f"Prefix warmup file not found: {location}") from e
+
+
+def _validate_prefix_warmup_entry(entry: object, idx: int) -> dict:
+    if not isinstance(entry, dict):
+        raise RuntimeError(
+            f"Prefix warmup entry #{idx} must be a JSON object, got "
+            f"{type(entry).__name__}"
+        )
+    messages = entry.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise RuntimeError(
+            f"Prefix warmup entry #{idx} must have a non-empty 'messages' list"
+        )
+    return entry
+
+
+def _build_prefix_warmup_request(
+    entry: dict, idx: int, served_model_name: str
+) -> ChatCompletionRequest:
+    request_kwargs = dict(entry)
+    request_kwargs.setdefault("max_tokens", 1)
+    request_kwargs["model"] = served_model_name
+    request_kwargs["stream"] = False
+    request_kwargs["request_id"] = f"prefix-warmup-{idx}"
+    try:
+        return ChatCompletionRequest(**request_kwargs)
+    except Exception as e:
+        raise RuntimeError(
+            f"Prefix warmup entry #{idx} is not a valid chat request: {e}"
+        ) from e
+
+
+async def _run_prefix_warmup_entry(
+    chat_handler: Any,
+    entry: dict,
+    idx: int,
+    served_model_name: str,
+    total: int,
+) -> None:
+    request = _build_prefix_warmup_request(entry, idx, served_model_name)
+    result = await chat_handler.create_chat_completion(request, raw_request=None)
+
+    if isinstance(result, ErrorResponse):
+        raise RuntimeError(
+            f"Prefix warmup request #{idx} failed: {result.error.message} "
+            f"(code={result.error.code})"
+        )
+    if not isinstance(result, ChatCompletionResponse):
+        raise RuntimeError(
+            f"Prefix warmup request #{idx} returned unexpected type "
+            f"{type(result).__name__}; expected ChatCompletionResponse."
+        )
+
+    usage = getattr(result, "usage", None)
+    logger.info(
+        "Prefix warmup request #%d/%d primed (prompt_tokens=%s)",
+        idx + 1,
+        total,
+        getattr(usage, "prompt_tokens", "?"),
+    )
+
+
+async def run_prefix_warmup(state: State, args: Namespace) -> None:
+    """Prime the prefix/KV cache by running chat warmup requests.
+
+    Reads ``args.prefix_warmup_file`` (a JSON list of chat-completion-style
+    requests) and runs each one through the same chat serving handler used for
+    real traffic, so the chat template and tokenization match exactly. The flag
+    accepts a local path or an http(s) URL. Use ``args.prefix_warmup_count`` to
+    run only the first N entries, and ``args.prefix_warmup_parallel`` to run them
+    concurrently. This runs before ``serve_http``, so ``/health`` is not yet
+    reachable. Any failure raises ``RuntimeError`` and aborts server startup
+    (fatal).
+    """
+    warmup_path = getattr(args, "prefix_warmup_file", None)
+    if not warmup_path:
+        return
+
+    chat_handler = getattr(state, "openai_serving_chat", None)
+    if chat_handler is None:
+        raise RuntimeError(
+            "Prefix warmup requested via --prefix-warmup-file but the chat "
+            "completions API is unavailable (the 'generate' task is not "
+            "supported by this model). Aborting startup."
+        )
+
+    raw = _load_prefix_warmup_bytes(warmup_path)
+    try:
+        entries = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"Prefix warmup file is not valid JSON ({warmup_path}): {e}"
+        ) from e
+
+    if not isinstance(entries, list):
+        raise RuntimeError(
+            f"Prefix warmup file must contain a JSON list, got "
+            f"{type(entries).__name__}: {warmup_path}"
+        )
+    if not entries:
+        logger.warning(
+            "Prefix warmup file %s is empty; nothing to warm up.", warmup_path
+        )
+        return
+
+    warmup_count = getattr(args, "prefix_warmup_count", None)
+    if warmup_count is not None:
+        if warmup_count <= 0:
+            logger.warning(
+                "Prefix warmup count %d is not positive; nothing to warm up.",
+                warmup_count,
+            )
+            return
+        entries = entries[:warmup_count]
+
+    run_parallel = bool(getattr(args, "prefix_warmup_parallel", False))
+    served_model_name = state.openai_serving_models.base_model_paths[0].name
+    total = len(entries)
+
+    logger.info(
+        "Running prefix warmup: %d request(s) from %s (%s)",
+        total,
+        warmup_path,
+        "parallel" if run_parallel else "sequential",
+    )
+
+    validated = [
+        _validate_prefix_warmup_entry(entry, idx) for idx, entry in enumerate(entries)
+    ]
+
+    if run_parallel:
+        await asyncio.gather(
+            *[
+                _run_prefix_warmup_entry(
+                    chat_handler, entry, idx, served_model_name, total
+                )
+                for idx, entry in enumerate(validated)
+            ]
+        )
+    else:
+        for idx, entry in enumerate(validated):
+            await _run_prefix_warmup_entry(
+                chat_handler, entry, idx, served_model_name, total
+            )
+
+    logger.info("Prefix warmup complete: %d request(s) primed.", total)
+
+
 async def build_and_serve(
     engine_client: EngineClient,
     listen_address: str,
@@ -577,6 +757,10 @@ async def build_and_serve(
     logger.info("Supported tasks: %s", supported_tasks)
     app = build_app(args, supported_tasks, model_config)
     await init_app_state(engine_client, app.state, args, supported_tasks)
+
+    # Prefix warmup runs before serve_http, so /health is not yet reachable.
+    # A failure here aborts startup (fatal) before the server accepts traffic.
+    await run_prefix_warmup(app.state, args)
 
     logger.info("Starting vLLM server on %s", listen_address)
 

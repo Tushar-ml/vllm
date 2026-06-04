@@ -842,13 +842,17 @@ class DelegatingParser(Parser):
             if self.is_reasoning_end_streaming(current_token_ids, delta_token_ids):
                 state.reasoning_ended = True
                 current_token_ids = self.extract_content_ids(delta_token_ids)
-                current_text = (
-                    delta_message.content
-                    if delta_message and delta_message.content
-                    else ""
-                )
-                delta_text = current_text
-                delta_token_ids = current_token_ids
+                if delta_message and delta_message.content:
+                    current_text = delta_message.content
+                    delta_message.content = None
+                else:
+                    # Preserve tool-call tail from this chunk (Gemma4 may end
+                    # reasoning on <|tool_call>| in the same delta).
+                    from vllm.tool_parsers.gemma4_format import (
+                        extract_tool_handoff_text,
+                    )
+
+                    current_text = extract_tool_handoff_text(current_text)
 
         # Tool call extraction
         if self._in_tool_call_phase(state):

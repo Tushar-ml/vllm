@@ -290,6 +290,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "google/gemma-4-E2B-it",
         min_transformers_version="5.0.0",
     ),
+    "Gemma4UnifiedForConditionalGeneration": _HfExamplesInfo(
+        "google/gemma-4-12B-it",
+        min_transformers_version="5.8.0",
+        is_available_online=False,
+    ),
     "Gemma3nForCausalLM": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmForCausalLM": _HfExamplesInfo("zai-org/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo("zai-org/GLM-4-9B-0414"),
