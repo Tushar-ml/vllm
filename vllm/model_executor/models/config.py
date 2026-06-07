@@ -67,14 +67,13 @@ class Gemma4Config(VerifyAndUpdateConfig):
         backend for each layer type. This mixed-backend execution produces
         numerical divergence and output corruption.
 
-        The fix detects heterogeneous head dimensions from the model config
-        and forces TRITON_ATTN (which has no head_size ceiling) for all
-        layers when the user hasn't explicitly chosen a backend.
-
-        TODO: Heterogeneous head_sizes (head_dim != global_head_dim)
-        require NixlConnector changes to support per-layer KV transfer
-        with different head dimensions for prefill-decode disaggregation.
+        When no attention backend is set, force TRITON_ATTN if FlashAttention
+        cannot support the largest head dimension (prevents per-layer autoselect
+        from mixing backends). If the user explicitly sets an attention backend
+        that cannot support max_head_dim (e.g. GEMMA4_FLASH_ATTN on Blackwell),
+        raise an error instead of silently falling back.
         """
+
         hf_text_config = vllm_config.model_config.hf_text_config
         head_dim = getattr(hf_text_config, "head_dim", None)
         global_head_dim = getattr(hf_text_config, "global_head_dim", None)
@@ -85,25 +84,56 @@ class Gemma4Config(VerifyAndUpdateConfig):
         # the config carries global_head_dim but all layers can still use
         # the same FA backend.
         max_head_dim = max(head_dim or 0, global_head_dim or 0)
-        if (
+        if not (
             head_dim is not None
             and global_head_dim is not None
             and head_dim != global_head_dim
             and max_head_dim > 256
-            and vllm_config.attention_config.backend is None
         ):
-            from vllm.v1.attention.backends.registry import (
-                AttentionBackendEnum,
-            )
+            return
 
-            vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
-            logger.info(
-                "Gemma4 model has heterogeneous head dimensions "
-                "(head_dim=%d, global_head_dim=%d). Forcing TRITON_ATTN "
-                "backend to prevent mixed-backend numerical divergence.",
-                head_dim,
-                global_head_dim,
-            )
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        user_backend = vllm_config.attention_config.backend
+        fa_supports_max_head = FlashAttentionBackend.supports_head_size(
+            max_head_dim
+        )
+        flash_backends = frozenset(
+            {
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.GEMMA4_FLASH_ATTN,
+            }
+        )
+
+        if user_backend is not None:
+            if user_backend == AttentionBackendEnum.TRITON_ATTN:
+                return
+            if user_backend in flash_backends:
+                if fa_supports_max_head:
+                    return
+                raise ValueError(
+                    "Gemma4 has heterogeneous head dimensions "
+                    f"(head_dim={head_dim}, global_head_dim={global_head_dim}). "
+                    f"The requested attention backend "
+                    f"{user_backend.name!r} cannot run full-attention layers with "
+                    f"head_size={max_head_dim} on this FlashAttention build. "
+                    "Use --attention-backend=TRITON_ATTN or omit "
+                    "--attention-backend to auto-select TRITON_ATTN."
+                )
+            return
+
+        if fa_supports_max_head:
+            return
+
+        logger.info(
+            "Gemma4 model has heterogeneous head dimensions "
+            "(head_dim=%d, global_head_dim=%d). Forcing TRITON_ATTN "
+            "backend to prevent mixed-backend numerical divergence.",
+            head_dim,
+            global_head_dim,
+        )
+        vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
 
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):

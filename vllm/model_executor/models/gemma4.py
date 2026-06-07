@@ -27,7 +27,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -64,6 +64,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 from vllm.v1.attention.backends.gemma4_flash_attn import (
     Gemma4FlashAttentionBackend,
@@ -492,6 +493,16 @@ class Gemma4Attention(nn.Module):
             is_neox_style=True,
         )
 
+        # Heterogeneous Gemma4 may force TRITON_ATTN when no backend is set
+        # (see Gemma4Config). Use Gemma4FlashAttentionBackend when the user
+        # explicitly selects a Flash backend that supports max_head_dim (e.g. H100).
+        vllm_config = get_current_vllm_config()
+        forced_backend = vllm_config.attention_config.backend
+        if forced_backend in (None, AttentionBackendEnum.TRITON_ATTN):
+            attn_backend = None
+        else:
+            attn_backend = Gemma4FlashAttentionBackend
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -502,9 +513,7 @@ class Gemma4Attention(nn.Module):
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
-            attn_backend=Gemma4FlashAttentionBackend,
-            apply_v_norm=not self.is_kv_shared_layer,
-            v_norm_eps=config.rms_norm_eps,
+            attn_backend=attn_backend,
             prefix=f"{prefix}.attn",
         )
 
@@ -526,10 +535,13 @@ class Gemma4Attention(nn.Module):
         q = q.flatten(-2, -1)
 
         if not self.is_kv_shared_layer:
-            # Non-shared: apply K norm + RoPE, V norm
+            # Non-shared: apply K norm + RoPE, V norm (see Gemma3nAttention).
             k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
             k = self.k_norm(k)
             k = k.flatten(-2, -1)
+            v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
+            v = self.v_norm(v)
+            v = v.flatten(-2, -1)
             q, k = self.rotary_emb(positions, q, k)
         else:
             # Shared: only apply RoPE to Q

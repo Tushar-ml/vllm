@@ -175,9 +175,17 @@ class FlashAttentionBackend(AttentionBackend):
             return False
         if head_size <= 256:
             return True
-        if is_fa_version_supported(4):
-            return head_size <= 512
-        return False
+        fa_version = get_flash_attn_version(head_size=head_size)
+        if fa_version is None:
+            return False
+        # FA3 shares the <=256 kernel ceiling for varlen on many platforms.
+        if fa_version == 3:
+            return head_size <= 256
+        # FA2 varlen_fwd only supports head_dim <= 256 in vLLM's FlashAttention.
+        if fa_version == 2:
+            return head_size <= 256
+        # FA4 (when actually selected, not downgraded inside get_flash_attn_version)
+        return head_size <= 512
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:

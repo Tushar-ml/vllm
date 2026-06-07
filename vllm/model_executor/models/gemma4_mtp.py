@@ -25,7 +25,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
@@ -46,6 +46,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.gemma4_flash_attn import Gemma4FlashAttentionBackend
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .gemma4 import Gemma4MLP, _get_text_config
 from .utils import (
@@ -218,7 +220,14 @@ class Gemma4MTPAttention(nn.Module):
 
         # kv_sharing_target_layer_name is set after model construction
         # by Gemma4Proposer._setup_gemma4_kv_sharing().
-        self.is_kv_shared_layer = True
+        # Match Gemma4Attention backend selection (see Gemma4Config).
+        vllm_config = get_current_vllm_config()
+        forced_backend = vllm_config.attention_config.backend
+        if forced_backend in (None, AttentionBackendEnum.TRITON_ATTN):
+            attn_backend = None
+        else:
+            attn_backend = Gemma4FlashAttentionBackend
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -228,6 +237,7 @@ class Gemma4MTPAttention(nn.Module):
             quant_config=quant_config,
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
+            attn_backend=attn_backend,
             prefix=f"{prefix}.attn",
         )
 
