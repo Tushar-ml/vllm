@@ -5,13 +5,7 @@
 import torch
 
 from vllm.v1.attention.backend import AttentionType
-from vllm.v1.attention.backends.fa_utils import (
-    is_flash_attn_varlen_func_available,
-)
-
 from .flash_attn import FlashAttentionBackend, FlashAttentionImpl
-if is_flash_attn_varlen_func_available():
-    from vllm.v1.attention.backends.fa_utils import reshape_and_cache_flash
 
 
 class Gemma4FlashAttentionBackend(FlashAttentionBackend):
@@ -104,17 +98,9 @@ class Gemma4FlashAttentionImpl(FlashAttentionImpl):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
 
-        key_cache, value_cache = kv_cache.unbind(0)
+        # Apply Gemma4 V-norm before caching; delegate KV layout/unbind to
+        # FlashAttentionImpl (see FlashAttentionBackend.get_kv_cache_shape).
         if self.apply_v_norm:
             value = self._rms_norm_no_weight(value)
 
-        reshape_and_cache_flash(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slot_mapping,
-            self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
-        )
+        super().do_kv_cache_update(layer, key, value, kv_cache, slot_mapping)
