@@ -784,6 +784,29 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_time_to_first_token, per_engine_labelvalues
         )
 
+        histogram_first_token_cache_hit_ratio = self._histogram_cls(
+            name="vllm:first_token_prefix_cache_hit_ratio",
+            documentation=(
+                "Ratio of prefix-cached prompt tokens at first-token emission "
+                "(num_cached_tokens / num_prompt_tokens)."
+            ),
+            buckets=[
+                0.0,
+                0.1,
+                0.25,
+                0.5,
+                0.75,
+                0.9,
+                0.95,
+                0.99,
+                1.0,
+            ],
+            labelnames=labelnames,
+        )
+        self.histogram_first_token_cache_hit_ratio = create_metric_per_engine(
+            histogram_first_token_cache_hit_ratio, per_engine_labelvalues
+        )
+
         histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
             documentation="Histogram of inter-token latency in seconds.",
@@ -1172,6 +1195,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_n_request[engine_idx].observe(n_param)
         for ttft in iteration_stats.time_to_first_tokens_iter:
             self.histogram_time_to_first_token[engine_idx].observe(ttft)
+        for first_token_stats in iteration_stats.first_token_stats_iter:
+            self.histogram_first_token_cache_hit_ratio[engine_idx].observe(
+                first_token_stats.cache_hit_ratio
+            )
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)
 
