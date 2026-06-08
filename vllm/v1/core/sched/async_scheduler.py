@@ -14,6 +14,7 @@ class AsyncScheduler(Scheduler):
         super().__init__(*args, **kwargs)
         # reusable read-only placeholder list for speculative decoding.
         self._spec_token_placeholders: list[int] = [-1] * self.num_spec_tokens
+        self.pp_size = self.parallel_config.pipeline_parallel_size
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
