@@ -1613,6 +1613,69 @@ def _get_kv_cache_groups_uniform_groups(
     return [full_mla_group, *swa_mla_groups]
 
 
+def _layers_prefix_from_kv_cache_spec(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> str:
+    for layer_name in kv_cache_spec:
+        if ".layers." in layer_name:
+            return layer_name.split(".layers.")[0] + ".layers"
+    return "model.layers"
+
+
+def _gemma4_mtp_kv_sharing_target_layer_names(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> set[str]:
+    """Return target attention layer names whose KV the Gemma4 MTP draft reads."""
+    target_text_config = vllm_config.model_config.hf_text_config
+    target_layer_types = getattr(target_text_config, "layer_types", [])
+    target_num_kv_shared = getattr(target_text_config, "num_kv_shared_layers", 0)
+    num_non_shared = len(target_layer_types) - target_num_kv_shared
+
+    type_to_last_idx: dict[str, int] = {}
+    for idx, layer_type in enumerate(target_layer_types[:num_non_shared]):
+        type_to_last_idx[layer_type] = idx
+
+    layers_prefix = _layers_prefix_from_kv_cache_spec(kv_cache_spec)
+    spec_layer_names = set(kv_cache_spec)
+    target_layers: set[str] = set()
+    for layer_idx in type_to_last_idx.values():
+        prefix = f"{layers_prefix}.{layer_idx}.self_attn"
+        matched = {name for name in spec_layer_names if name.startswith(prefix)}
+        if matched:
+            target_layers.update(matched)
+        else:
+            target_layers.add(f"{prefix}.attn")
+    return target_layers
+
+
+def _annotate_eagle_groups_gemma4(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> None:
+    """Flag KV cache groups used by Gemma4 MTP draft KV sharing.
+
+    Without this annotation, ``KVCacheCoordinator`` conservatively treats every
+    group as an EAGLE group when MTP is enabled, applying last-block-drop
+    prefix-cache rules to full-attention layers that the draft never reads.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or not spec_config.use_gemma4_mtp():
+        return
+
+    model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
+    if model_type not in ("gemma4", "gemma4_mm"):
+        return
+
+    target_layers = _gemma4_mtp_kv_sharing_target_layer_names(
+        vllm_config, kv_cache_spec
+    )
+    for group in kv_cache_groups:
+        if any(layer_name in target_layers for layer_name in group.layer_names):
+            group.is_eagle_group = True
+
+
 def _annotate_eagle_groups_deepseek_v4(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -1675,6 +1738,7 @@ def get_kv_cache_groups(
         # UniformTypeKVCacheSpecs.
         kv_cache_groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
         _annotate_eagle_groups_deepseek_v4(vllm_config, kv_cache_spec, kv_cache_groups)
+        _annotate_eagle_groups_gemma4(vllm_config, kv_cache_spec, kv_cache_groups)
         return kv_cache_groups
 
     # Pull HiddenStateCacheSpec layers out before the general multi-group
@@ -1703,6 +1767,8 @@ def get_kv_cache_groups(
             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             groups.append(KVCacheGroupSpec([name], aligned))
 
+    _annotate_eagle_groups_deepseek_v4(vllm_config, kv_cache_spec, groups)
+    _annotate_eagle_groups_gemma4(vllm_config, kv_cache_spec, groups)
     return groups
 
 

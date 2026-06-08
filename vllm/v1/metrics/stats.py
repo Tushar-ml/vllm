@@ -8,8 +8,11 @@ from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.logger import init_logger
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
@@ -199,6 +202,24 @@ class SchedulerStats:
 
 
 @dataclass
+class FirstTokenStats:
+    """Observability snapshot emitted when the first token is produced."""
+
+    request_id: str
+    ttft_s: float
+    queued_s: float
+    prefill_s: float
+    num_cached_tokens: int
+    num_prompt_tokens: int
+
+    @property
+    def cache_hit_ratio(self) -> float:
+        if self.num_prompt_tokens <= 0:
+            return 0.0
+        return self.num_cached_tokens / self.num_prompt_tokens
+
+
+@dataclass
 class RequestStateStats:
     """Stats that need to be tracked across delta updates."""
 
@@ -334,6 +355,7 @@ class IterationStats:
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
         self.time_to_first_tokens_iter: list[float] = []
+        self.first_token_stats_iter: list[FirstTokenStats] = []
         self.inter_token_latencies_iter: list[float] = []
         self.num_corrupted_reqs: int = 0
 
@@ -363,12 +385,51 @@ class IterationStats:
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:
-            if output.prefill_stats is not None:
-                self.prompt_token_stats.update_from_output(output.prefill_stats)
+            prefill_stats = output.prefill_stats
+            if prefill_stats is not None:
+                self.prompt_token_stats.update_from_output(prefill_stats)
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
             req_stats.first_token_latency = first_token_latency
+            req_stats.first_token_ts = engine_core_timestamp
+
+            queued_s = (
+                req_stats.scheduled_ts - req_stats.queued_ts
+                if req_stats.scheduled_ts > 0.0 and req_stats.queued_ts > 0.0
+                else 0.0
+            )
+            prefill_s = (
+                req_stats.first_token_ts - req_stats.scheduled_ts
+                if req_stats.scheduled_ts > 0.0
+                else 0.0
+            )
+            first_token_stats = FirstTokenStats(
+                request_id=output.request_id,
+                ttft_s=first_token_latency,
+                queued_s=queued_s,
+                prefill_s=prefill_s,
+                num_cached_tokens=(
+                    prefill_stats.num_cached_tokens if prefill_stats else 0
+                ),
+                num_prompt_tokens=(
+                    prefill_stats.num_prompt_tokens if prefill_stats else 0
+                ),
+            )
+            self.first_token_stats_iter.append(first_token_stats)
+
+            log_fn = logger.info if first_token_latency >= 1.0 else logger.debug
+            log_fn(
+                "First token: request_id=%s ttft_ms=%.1f queued_ms=%.1f "
+                "prefill_ms=%.1f cached_tokens=%d/%d (ratio=%.2f)",
+                first_token_stats.request_id,
+                first_token_stats.ttft_s * 1000,
+                first_token_stats.queued_s * 1000,
+                first_token_stats.prefill_s * 1000,
+                first_token_stats.num_cached_tokens,
+                first_token_stats.num_prompt_tokens,
+                first_token_stats.cache_hit_ratio,
+            )
 
         req_stats.num_generation_tokens += num_new_generation_tokens
 
@@ -393,9 +454,7 @@ class IterationStats:
             )
 
         # Process the batch-level "new tokens" engine core event
-        if is_prefilling:
-            req_stats.first_token_ts = engine_core_timestamp
-        else:
+        if not is_prefilling:
             itl = engine_core_timestamp - req_stats.last_token_ts
             self.inter_token_latencies_iter.append(itl)
 

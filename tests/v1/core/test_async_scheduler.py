@@ -320,3 +320,212 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     assert request.status == RequestStatus.FINISHED_ERROR
     assert request.request_id not in scheduler.requests
     assert not scheduler.running
+
+
+def test_preempt_resets_output_placeholders():
+    scheduler = create_scheduler(async_scheduling=True)
+    request = create_requests(num_requests=1, num_tokens=32, max_tokens=64)[0]
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = 40
+    request.num_output_placeholders = 5
+    request.discard_latest_async_tokens = True
+    scheduler.requests[request.request_id] = request
+    scheduler.running = [request]
+
+    scheduler.kv_cache_manager.free = Mock()
+    scheduler.encoder_cache_manager.free = Mock()
+    scheduler.waiting.prepend_request = Mock()
+
+    scheduler._preempt_request(request, timestamp=0.0)
+
+    assert request.num_output_placeholders == 0
+    assert request.discard_latest_async_tokens is False
+    assert request.num_computed_tokens == 0
+    assert request.status == RequestStatus.PREEMPTED
+
+
+def test_discarded_async_step_releases_placeholders():
+    scheduler = create_scheduler(async_scheduling=True)
+    request = create_requests(num_requests=1, num_tokens=32, max_tokens=64)[0]
+    request.num_output_placeholders = 5
+    request.num_computed_tokens = 33
+    request.is_prefill_chunk = False
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={request.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={request.request_id: [-1, -1, -1, -1]},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    scheduler._handle_discarded_async_step(
+        request, scheduler_output, request.request_id
+    )
+
+    assert request.num_output_placeholders == 0
+    assert request.num_computed_tokens == 32
+
+
+def test_resumed_request_schedulable_after_preempt_with_placeholders():
+    """After preemption, placeholders must not block decode scheduling."""
+    scheduler = create_scheduler(async_scheduling=True)
+    request = create_requests(num_requests=1, num_tokens=32, max_tokens=64)[0]
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = 32
+    request.num_output_placeholders = 5
+    scheduler.requests[request.request_id] = request
+    scheduler.running = [request]
+
+    scheduler.kv_cache_manager.free = Mock()
+    scheduler.encoder_cache_manager.free = Mock()
+    scheduler.waiting.prepend_request = Mock()
+
+    scheduler._preempt_request(request, timestamp=0.0)
+
+    # Simulate resume: request is scheduled from waiting with computed=0.
+    request.status = RequestStatus.PREEMPTED
+    request.num_computed_tokens = 0
+    num_new_tokens = (
+        request.num_tokens_with_spec
+        + request.num_output_placeholders
+        - request.num_computed_tokens
+    )
+    assert request.num_output_placeholders == 0
+    assert num_new_tokens > 0
+
+    # Skip-at-max-tokens guard must not trigger before max_tokens are emitted.
+    skip = (
+        request.num_output_placeholders > 0
+        and request.num_computed_tokens + 2 - request.num_output_placeholders
+        >= request.num_prompt_tokens + request.max_tokens
+    )
+    assert not skip
+
+
+def test_preempted_stale_tokens_release_placeholders():
+    """Stale tokens for a preempted request must release scheduled placeholders."""
+    scheduler = create_scheduler(async_scheduling=True)
+    request = create_requests(num_requests=1, num_tokens=32, max_tokens=64)[0]
+    request.status = RequestStatus.PREEMPTED
+    request.num_computed_tokens = 33
+    request.num_output_placeholders = 5
+    request.is_prefill_chunk = False
+    scheduler.requests[request.request_id] = request
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={request.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={request.request_id: [-1, -1, -1, -1]},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[99, 100, 101]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    outputs = scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.num_output_placeholders == 0
+    assert request.num_computed_tokens == 32
+    assert request.status == RequestStatus.PREEMPTED
+    assert all(not batch.outputs for batch in outputs.values())
+
+
+def test_discard_latest_async_tokens_releases_placeholders():
+    scheduler = create_scheduler(async_scheduling=True)
+    request = create_requests(num_requests=1, num_tokens=32, max_tokens=64)[0]
+    request.discard_latest_async_tokens = True
+    request.num_output_placeholders = 5
+    request.num_computed_tokens = 33
+    request.is_prefill_chunk = False
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={request.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={request.request_id: [-1, -1, -1, -1]},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    new_token_ids, stopped = scheduler._update_request_with_output(
+        request, [123], scheduler_output, request.request_id
+    )
+
+    assert new_token_ids == []
+    assert stopped is False
+    assert request.discard_latest_async_tokens is False
+    assert request.num_output_placeholders == 0
+    assert request.num_computed_tokens == 32
+
+
+def test_reconcile_unblocks_stranded_running_request():
+    scheduler = create_scheduler(async_scheduling=True)
+    request = create_requests(num_requests=1, num_tokens=32, max_tokens=64)[0]
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = 37
+    request.num_output_placeholders = 5
+    request.is_prefill_chunk = False
+    request.spec_token_ids = [-1, -1, -1, -1]
+    scheduler.requests[request.request_id] = request
+    scheduler.running = [request]
+
+    sched_output = scheduler.schedule()
+
+    assert request.request_id in sched_output.num_scheduled_tokens
+    assert sched_output.num_scheduled_tokens[request.request_id] > 0
+
+
+def test_stale_output_skipped_for_preempted_request():
+    """Pipelined batch output must not mutate preempted request state."""
+    scheduler = create_scheduler(async_scheduling=True)
+    request = create_requests(num_requests=1, num_tokens=32, max_tokens=64)[0]
+    request.status = RequestStatus.PREEMPTED
+    request.num_computed_tokens = 33
+    request.num_output_placeholders = 5
+    request.is_prefill_chunk = False
+    scheduler.requests[request.request_id] = request
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={request.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={request.request_id: [-1, -1, -1, -1]},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[99]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    outputs = scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.num_output_placeholders == 0
+    assert request.num_computed_tokens == 32
+    assert request.status == RequestStatus.PREEMPTED
+    assert all(not batch.outputs for batch in outputs.values())

@@ -327,6 +327,24 @@ def extract_tool_calls(text: str) -> list[tuple[str, str]]:
         if func_name:
             results.append((func_name, args_str))
         search_from = end + len(TOOL_CALL_END)
+
+    if results:
+        return results
+
+    # Bare ``call:name{...}`` with no wrapper markers (batch / unary handoff).
+    search_from = 0
+    while True:
+        call_idx = tool_call_markup_start(text[search_from:])
+        if call_idx == -1:
+            break
+        call_idx += search_from
+        func_name, args_str = _parse_call_region(text[call_idx:])
+        if func_name:
+            consumed = call_idx + len("call:") + len(func_name) + 1 + len(args_str) + 1
+            results.append((func_name, args_str))
+            search_from = min(consumed, len(text))
+        else:
+            search_from = call_idx + 5
     return results
 
 

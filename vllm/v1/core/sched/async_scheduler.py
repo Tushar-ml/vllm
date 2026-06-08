@@ -35,19 +35,74 @@ class AsyncScheduler(Scheduler):
             # We will update the actual spec token ids in the worker process.
             request.spec_token_ids = self._spec_token_placeholders
 
-            if self.use_v2_model_runner:
-                # Set the next step index in which this request is eligible to be
-                # scheduled for decode (for PP microbatching).
-                request.next_decode_eligible_step = self.current_step + self.pp_size
+    def _release_scheduled_async_placeholders(
+        self,
+        request: Request,
+        scheduler_output: SchedulerOutput,
+        req_id: str,
+    ) -> None:
+        if request.is_prefill_chunk:
+            return
+        num_scheduled = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+        if request.num_output_placeholders <= 0 and num_scheduled <= 0:
+            return
+        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
+        cur_num_spec_tokens = len(spec_decode_tokens.get(req_id, ()))
+        if request.num_output_placeholders > 0:
+            release = min(request.num_output_placeholders, 1 + cur_num_spec_tokens)
+            request.num_output_placeholders -= release
+        if num_scheduled > 0:
+            request.num_computed_tokens = max(
+                0, request.num_computed_tokens - num_scheduled
+            )
+
+    def _handle_discarded_async_step(
+        self,
+        request: Request,
+        scheduler_output: SchedulerOutput,
+        req_id: str,
+    ) -> None:
+        self._release_scheduled_async_placeholders(
+            request, scheduler_output, req_id
+        )
+
+    def _reconcile_async_placeholders(self, request: Request) -> bool:
+        if (
+            request.is_prefill_chunk
+            or request.is_finished()
+            or request.num_output_placeholders <= 0
+        ):
+            return False
+        if request.num_computed_tokens >= request.num_tokens:
+            logger.debug(
+                "Reconciling async placeholders for request %s: "
+                "placeholders %d -> 0, computed %d -> %d",
+                request.request_id,
+                request.num_output_placeholders,
+                request.num_computed_tokens,
+                request.num_tokens,
+            )
+            request.num_output_placeholders = 0
+            if request.num_computed_tokens > request.num_tokens:
+                request.num_computed_tokens = request.num_tokens
+            return True
+        return False
 
     def _update_request_with_output(
-        self, request: Request, new_token_ids: list[int]
+        self,
+        request: Request,
+        new_token_ids: list[int],
+        scheduler_output: SchedulerOutput | None = None,
+        req_id: str | None = None,
     ) -> tuple[list[int], bool]:
-        if request.async_tokens_to_discard > 0:
-            # The request was force-preempted in reset_prefix_cache; drop one
-            # stale in-flight async output frame per call until the counter
-            # is drained.
-            request.async_tokens_to_discard -= 1
+        if request.discard_latest_async_tokens:
+            # If the request is force preempted in reset_prefix_cache, we
+            # should discard the latest async token.
+            request.discard_latest_async_tokens = False
+            if scheduler_output is not None and req_id is not None:
+                self._release_scheduled_async_placeholders(
+                    request, scheduler_output, req_id
+                )
             return [], False
 
         status_before_update = request.status

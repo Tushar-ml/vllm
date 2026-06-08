@@ -435,6 +435,31 @@ class Scheduler(SchedulerInterface):
                 )
 
             if num_new_tokens == 0:
+                if self._reconcile_async_placeholders(request):
+                    num_new_tokens = (
+                        request.num_tokens_with_spec
+                        + request.num_output_placeholders
+                        - request.num_computed_tokens
+                    )
+                    if (
+                        0
+                        < self.scheduler_config.long_prefill_token_threshold
+                        < num_new_tokens
+                    ):
+                        num_new_tokens = (
+                            self.scheduler_config.long_prefill_token_threshold
+                        )
+                    num_new_tokens = min(num_new_tokens, token_budget)
+                    num_new_tokens = min(
+                        num_new_tokens,
+                        self.max_model_len - 1 - request.num_computed_tokens,
+                    )
+                    if self.need_mamba_block_aligned_split:
+                        num_new_tokens = self._mamba_block_aligned_split(
+                            request, num_new_tokens
+                        )
+
+            if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
                 # 1. No new tokens to schedule. This may happen when
@@ -818,6 +843,9 @@ class Scheduler(SchedulerInterface):
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
+                    if self.scheduler_config.async_scheduling:
+                        request.num_output_placeholders = 0
+                        request.discard_latest_async_tokens = False
                 else:
                     raise RuntimeError(f"Invalid request status: {request.status}")
 
@@ -969,12 +997,29 @@ class Scheduler(SchedulerInterface):
         request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
+        if self.scheduler_config.async_scheduling:
+            # Async scheduling increments placeholders per scheduled decode step.
+            # Leaving them set after preemption strands resumed requests because
+            # the running-request loop skips them (num_new_tokens == 0).
+            request.num_output_placeholders = 0
+            request.discard_latest_async_tokens = False
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
+
+    def _handle_discarded_async_step(
+        self,
+        request: Request,
+        scheduler_output: SchedulerOutput,
+        req_id: str,
+    ) -> None:
+        """Release async placeholder state when a step returns no tokens."""
+
+    def _reconcile_async_placeholders(self, request: Request) -> bool:
+        return False
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -1390,6 +1435,13 @@ class Scheduler(SchedulerInterface):
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
 
+            if request.status == RequestStatus.PREEMPTED:
+                # Stale output from a batch scheduled before preemption.
+                self._handle_discarded_async_step(
+                    request, scheduler_output, req_id
+                )
+                continue
+
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
@@ -1431,9 +1483,13 @@ class Scheduler(SchedulerInterface):
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
-                    request, new_token_ids
+                    request, new_token_ids, scheduler_output, req_id
                 )
-            elif request.pooling_params and pooler_output is not None:
+            else:
+                self._handle_discarded_async_step(
+                    request, scheduler_output, req_id
+                )
+            if request.pooling_params and pooler_output is not None and not new_token_ids:
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
@@ -1672,7 +1728,11 @@ class Scheduler(SchedulerInterface):
         return False
 
     def _update_request_with_output(
-        self, request: Request, new_token_ids: list[int]
+        self,
+        request: Request,
+        new_token_ids: list[int],
+        scheduler_output: SchedulerOutput | None = None,
+        req_id: str | None = None,
     ) -> tuple[list[int], bool]:
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
