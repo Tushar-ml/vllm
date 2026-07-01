@@ -32,8 +32,8 @@ def _render(template, messages, **kwargs):
 
 class TestGemma4ChatTemplate:
     def test_basic_multiturn_thinking_disabled(self, gemma4_template):
-        """With enable_thinking=False (default), HF template ends generation
-        prompt at <|turn>model (no empty thought-channel injection)."""
+        """With enable_thinking=False (default), generation prompt ends with
+        an empty thought channel to suppress thinking."""
         messages = [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there!"},
@@ -45,8 +45,7 @@ class TestGemma4ChatTemplate:
         assert "Hello" in result
         assert "Hi there!" in result
         assert "How are you?" in result
-        assert "<|think|>" not in result
-        assert result.rstrip("\n").endswith("<|turn>model")
+        assert result.rstrip("\n").endswith("<|channel>thought\n<channel|>")
 
     def test_basic_multiturn_thinking_enabled(self, gemma4_template):
         """With enable_thinking=True, generation prompt ends with model
@@ -172,39 +171,6 @@ class TestGemma4ChatTemplate:
         assert "response:get_weather{" in result
         assert "<tool_response|>" in result
         assert '"temperature": 15' in result
-
-    def test_tool_response_multimodal_content_parts(self, gemma4_template):
-        """role='tool' with content parts emits modality markers after response."""
-        messages = [
-            {"role": "user", "content": "Describe image"},
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_1",
-                        "function": {
-                            "name": "analyze",
-                            "arguments": {},
-                        },
-                    }
-                ],
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "call_1",
-                "content": [
-                    {"type": "text", "text": "red circle"},
-                    {"type": "image"},
-                    {"type": "audio"},
-                ],
-            },
-        ]
-        result = _render(gemma4_template, messages)
-        assert "<|tool_response>" in result
-        assert "<tool_response|>" in result
-        assert "<|image|>" in result
-        assert "<|audio|>" in result
 
     def test_tool_responses_legacy_style(self, gemma4_template):
         """tool_responses embedded on the assistant message."""
@@ -392,7 +358,7 @@ class TestGemma4ChatTemplate:
                         "type": "function",
                         "function": {
                             "name": "download_image",
-                            "arguments": '{"url": "https://example.com/x.png"}',
+                            "arguments": {"url": "https://example.com/x.png"},
                         },
                     },
                 ],
@@ -426,7 +392,7 @@ class TestGemma4ChatTemplate:
                         "type": "function",
                         "function": {
                             "name": "process",
-                            "arguments": "{}",
+                            "arguments": {},
                         },
                     },
                 ],

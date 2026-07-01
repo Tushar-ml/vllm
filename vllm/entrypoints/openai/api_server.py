@@ -3,20 +3,17 @@
 import asyncio
 import importlib
 import inspect
-import json
 import multiprocessing
 import multiprocessing.forkserver as forkserver
 import os
 import signal
 import socket
 import tempfile
-import urllib.request
 import warnings
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
-from urllib.parse import urlparse
+from typing import Any, cast
 
 import uvloop
 from fastapi import FastAPI, HTTPException
@@ -30,18 +27,14 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-)
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse, GenerationError
+from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.serve.render.serving import ServingRender
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
-from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
+from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
     cli_env_setup,
     log_non_default_args,
@@ -59,8 +52,11 @@ from vllm.entrypoints.serve.utils.server_utils import (
     log_response,
     validation_exception_handler,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
+from vllm.renderers.online_derenderer import OnlineDerenderer
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tool_parsers import ToolParserManager
 from vllm.tracing import instrument
@@ -257,6 +253,7 @@ def build_app(
     app.exception_handler(EngineGenerateError)(engine_error_handler)
     app.exception_handler(EngineDeadError)(engine_error_handler)
     app.exception_handler(GenerationError)(generation_error_handler)
+    app.exception_handler(VLLMValidationError)(exception_handler)
     app.exception_handler(Exception)(exception_handler)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
@@ -313,19 +310,12 @@ async def init_app_state(
 ) -> None:
     vllm_config = engine_client.vllm_config
 
-    # Propagate enable_in_reasoning to the API-server process. The engine core
-    # runs in a separate process, so the contextvar that backs
-    # `get_current_vllm_config_or_none()` is None on this stack. Tool parsers
-    # call `get_enable_structured_outputs_in_reasoning()` during request
-    # handling and need to see the real flag, otherwise they silently fall
-    # back to False and mismatch the engine-side bitmask gating.
-    from vllm.tool_parsers.structural_tag_registry import (
-        set_enable_structured_outputs_in_reasoning,
-    )
+    if args.tool_call_parser is not None:
+        from vllm.parser.metrics import init_parser_metrics
 
-    set_enable_structured_outputs_in_reasoning(
-        vllm_config.structured_outputs_config.enable_in_reasoning
-    )
+        init_parser_metrics(
+            model_name=cast(str, vllm_config.model_config.served_model_name)
+        )
 
     if supported_tasks is None:
         warnings.warn(
@@ -372,10 +362,9 @@ async def init_app_state(
     )
     await state.openai_serving_models.init_static_loras()
 
-    state.openai_serving_render = OpenAIServingRender(
+    state.online_renderer = OnlineRenderer(
         model_config=engine_client.model_config,
         renderer=engine_client.renderer,
-        model_registry=state.openai_serving_models.registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -388,15 +377,35 @@ async def init_app_state(
         log_error_stack=args.log_error_stack,
     )
 
-    state.openai_serving_tokenization = OpenAIServingTokenization(
-        engine_client,
+    state.online_derenderer = OnlineDerenderer(
+        model_config=engine_client.model_config,
+        renderer=engine_client.renderer,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        log_error_stack=args.log_error_stack,
+    )
+
+    state.serving_tokenization = ServingTokenization(
         state.openai_serving_models,
-        state.openai_serving_render,
+        state.online_renderer,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
+    )
+    state.serving_render = ServingRender(
+        state.openai_serving_models,
+        state.online_renderer,
+        state.online_derenderer,
+        request_logger=request_logger,
     )
 
     if "generate" in supported_tasks:
@@ -436,8 +445,8 @@ async def init_render_app_state(
     """
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
     from vllm.renderers import renderer_from_config
+    from vllm.renderers.online_renderer import OnlineRenderer
 
     served_model_names = args.served_model_name or [args.model]
     model_registry = OpenAIModelRegistry(
@@ -456,10 +465,9 @@ async def init_render_app_state(
     renderer = renderer_from_config(vllm_config)
     resolved_chat_template = load_chat_template(args.chat_template)
 
-    state.openai_serving_render = OpenAIServingRender(
+    state.online_renderer = OnlineRenderer(
         model_config=vllm_config.model_config,
         renderer=renderer,
-        model_registry=model_registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -467,15 +475,42 @@ async def init_render_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
-        reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        reasoning_parser=args.reasoning_parser,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        log_error_stack=args.log_error_stack,
+    )
+
+    state.online_derenderer = OnlineDerenderer(
+        model_config=vllm_config.model_config,
+        renderer=renderer,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        reasoning_parser=args.reasoning_parser,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
 
     state.openai_serving_models = model_registry
-
-    # Expose tokenization via the render handler (no engine required).
-    state.openai_serving_tokenization = state.openai_serving_render
+    state.serving_tokenization = ServingTokenization(
+        model_registry,
+        state.online_renderer,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        trust_request_chat_template=args.trust_request_chat_template,
+    )
+    state.serving_render = ServingRender(
+        model_registry,
+        state.online_renderer,
+        state.online_derenderer,
+        request_logger=request_logger,
+    )
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
@@ -561,178 +596,6 @@ def setup_server(args):
     return listen_address, sock
 
 
-def _load_prefix_warmup_bytes(location: str) -> bytes:
-    """Load the raw warmup-file bytes from a local path or an http(s) URL.
-
-    The scheme of ``location`` selects the loader: ``http``/``https`` download via
-    urllib (use a presigned URL to fetch from object stores such as S3 without
-    credentials on the host), anything else is treated as a local filesystem
-    path. Failures raise ``RuntimeError`` so startup aborts.
-    """
-    scheme = urlparse(location).scheme.lower()
-
-    if scheme in ("http", "https"):
-        try:
-            with urllib.request.urlopen(location, timeout=30) as resp:
-                return resp.read()
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to download prefix warmup file from {location}: {e}"
-            ) from e
-
-    try:
-        with open(location, "rb") as f:
-            return f.read()
-    except FileNotFoundError as e:
-        raise RuntimeError(f"Prefix warmup file not found: {location}") from e
-
-
-def _validate_prefix_warmup_entry(entry: object, idx: int) -> dict:
-    if not isinstance(entry, dict):
-        raise RuntimeError(
-            f"Prefix warmup entry #{idx} must be a JSON object, got "
-            f"{type(entry).__name__}"
-        )
-    messages = entry.get("messages")
-    if not isinstance(messages, list) or not messages:
-        raise RuntimeError(
-            f"Prefix warmup entry #{idx} must have a non-empty 'messages' list"
-        )
-    return entry
-
-
-def _build_prefix_warmup_request(
-    entry: dict, idx: int, served_model_name: str
-) -> ChatCompletionRequest:
-    request_kwargs = dict(entry)
-    request_kwargs.setdefault("max_tokens", 1)
-    request_kwargs["model"] = served_model_name
-    request_kwargs["stream"] = False
-    request_kwargs["request_id"] = f"prefix-warmup-{idx}"
-    try:
-        return ChatCompletionRequest(**request_kwargs)
-    except Exception as e:
-        raise RuntimeError(
-            f"Prefix warmup entry #{idx} is not a valid chat request: {e}"
-        ) from e
-
-
-async def _run_prefix_warmup_entry(
-    chat_handler: Any,
-    entry: dict,
-    idx: int,
-    served_model_name: str,
-    total: int,
-) -> None:
-    request = _build_prefix_warmup_request(entry, idx, served_model_name)
-    result = await chat_handler.create_chat_completion(request, raw_request=None)
-
-    if isinstance(result, ErrorResponse):
-        raise RuntimeError(
-            f"Prefix warmup request #{idx} failed: {result.error.message} "
-            f"(code={result.error.code})"
-        )
-    if not isinstance(result, ChatCompletionResponse):
-        raise RuntimeError(
-            f"Prefix warmup request #{idx} returned unexpected type "
-            f"{type(result).__name__}; expected ChatCompletionResponse."
-        )
-
-    usage = getattr(result, "usage", None)
-    logger.info(
-        "Prefix warmup request #%d/%d primed (prompt_tokens=%s)",
-        idx + 1,
-        total,
-        getattr(usage, "prompt_tokens", "?"),
-    )
-
-
-async def run_prefix_warmup(state: State, args: Namespace) -> None:
-    """Prime the prefix/KV cache by running chat warmup requests.
-
-    Reads ``args.prefix_warmup_file`` (a JSON list of chat-completion-style
-    requests) and runs each one through the same chat serving handler used for
-    real traffic, so the chat template and tokenization match exactly. The flag
-    accepts a local path or an http(s) URL. Use ``args.prefix_warmup_count`` to
-    run only the first N entries, and ``args.prefix_warmup_parallel`` to run them
-    concurrently. This runs before ``serve_http``, so ``/health`` is not yet
-    reachable. Any failure raises ``RuntimeError`` and aborts server startup
-    (fatal).
-    """
-    warmup_path = getattr(args, "prefix_warmup_file", None)
-    if not warmup_path:
-        return
-
-    chat_handler = getattr(state, "openai_serving_chat", None)
-    if chat_handler is None:
-        raise RuntimeError(
-            "Prefix warmup requested via --prefix-warmup-file but the chat "
-            "completions API is unavailable (the 'generate' task is not "
-            "supported by this model). Aborting startup."
-        )
-
-    raw = _load_prefix_warmup_bytes(warmup_path)
-    try:
-        entries = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"Prefix warmup file is not valid JSON ({warmup_path}): {e}"
-        ) from e
-
-    if not isinstance(entries, list):
-        raise RuntimeError(
-            f"Prefix warmup file must contain a JSON list, got "
-            f"{type(entries).__name__}: {warmup_path}"
-        )
-    if not entries:
-        logger.warning(
-            "Prefix warmup file %s is empty; nothing to warm up.", warmup_path
-        )
-        return
-
-    warmup_count = getattr(args, "prefix_warmup_count", None)
-    if warmup_count is not None:
-        if warmup_count <= 0:
-            logger.warning(
-                "Prefix warmup count %d is not positive; nothing to warm up.",
-                warmup_count,
-            )
-            return
-        entries = entries[:warmup_count]
-
-    run_parallel = bool(getattr(args, "prefix_warmup_parallel", False))
-    served_model_name = state.openai_serving_models.base_model_paths[0].name
-    total = len(entries)
-
-    logger.info(
-        "Running prefix warmup: %d request(s) from %s (%s)",
-        total,
-        warmup_path,
-        "parallel" if run_parallel else "sequential",
-    )
-
-    validated = [
-        _validate_prefix_warmup_entry(entry, idx) for idx, entry in enumerate(entries)
-    ]
-
-    if run_parallel:
-        await asyncio.gather(
-            *[
-                _run_prefix_warmup_entry(
-                    chat_handler, entry, idx, served_model_name, total
-                )
-                for idx, entry in enumerate(validated)
-            ]
-        )
-    else:
-        for idx, entry in enumerate(validated):
-            await _run_prefix_warmup_entry(
-                chat_handler, entry, idx, served_model_name, total
-            )
-
-    logger.info("Prefix warmup complete: %d request(s) primed.", total)
-
-
 async def build_and_serve(
     engine_client: EngineClient,
     listen_address: str,
@@ -756,10 +619,6 @@ async def build_and_serve(
     logger.info("Supported tasks: %s", supported_tasks)
     app = build_app(args, supported_tasks, model_config)
     await init_app_state(engine_client, app.state, args, supported_tasks)
-
-    # Prefix warmup runs before serve_http, so /health is not yet reachable.
-    # A failure here aborts startup (fatal) before the server accepts traffic.
-    await run_prefix_warmup(app.state, args)
 
     logger.info("Starting vLLM server on %s", listen_address)
 
