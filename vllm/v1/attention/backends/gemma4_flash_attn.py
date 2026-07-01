@@ -104,7 +104,7 @@ class Gemma4FlashAttentionImpl(FlashAttentionImpl):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
 
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = kv_cache.unbind(1)
         if self.apply_v_norm:
             value = self._rms_norm_no_weight(value)
 
