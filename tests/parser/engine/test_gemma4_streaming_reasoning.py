@@ -1479,6 +1479,55 @@ class TestBareThoughtWithoutChannelOpener:
         assert len(tool_calls) == 0
 
 
+# ── Regression: bare "thought\n" followed by a stray, later <|channel> ──
+#
+# The model occasionally emits a channel-less "thought\n..." prefix and
+# only opens a (redundant, malformed) <|channel> block partway through
+# the same turn. _preprocess_feed's injection guard used to check
+# "CHANNEL_START in delta_text" (substring) instead of a prefix check,
+# so the presence of that later, stray marker suppressed the injection
+# entirely and the whole "thought\n..." span leaked into `content`
+# unclassified and unstripped (non-streaming `parse()`/`extract_reasoning()`
+# feed the full text in one shot, so the stray marker is always visible).
+
+
+class TestBareThoughtWithLaterStrayChannelMarker:
+    """A stray <|channel> appearing after a channel-less "thought\\n"
+    prefix must not suppress the auto-injection for that prefix."""
+
+    def test_extract_reasoning_does_not_leak_thought_prefix(
+        self, tool_call_parser, mock_request
+    ):
+        model_output = (
+            "thought\nI'm really sorry that your shipment hasn't reached "
+            "you yet.<|channel>It looks like the delivery was attempted."
+        )
+        reasoning, content = tool_call_parser.extract_reasoning(
+            model_output, mock_request
+        )
+
+        assert "thought\n" not in (content or ""), (
+            f"thought\\n prefix leaked into content: {content!r}"
+        )
+        assert "I'm really sorry" in (reasoning or "") + (content or "")
+
+    def test_parse_does_not_leak_thought_prefix_into_content(
+        self, tool_call_parser, mock_request
+    ):
+        model_output = (
+            "thought\nI'm really sorry that your shipment hasn't reached "
+            "you yet.<|channel>It looks like the delivery was attempted."
+        )
+        reasoning, content, tool_calls = tool_call_parser.parse(
+            model_output, mock_request
+        )
+
+        assert "thought\n" not in (content or ""), (
+            f"thought\\n prefix leaked into content: {content!r}"
+        )
+        assert not tool_calls
+
+
 # ── Regression: commas inside <|"|>-delimited string values ─────────
 #
 # _make_tokenizer sets all_special_tokens, which activates the auto-drop

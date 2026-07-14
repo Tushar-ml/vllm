@@ -438,16 +438,19 @@ class Gemma4Parser(ParserEngine):
         ):
             return delta_text, delta_token_ids
 
-        if CHANNEL_START in delta_text:
-            return delta_text, delta_token_ids
+        starts_bare = delta_text.startswith(
+            _GEMMA4_THOUGHT_PREFIX
+        ) or delta_text == _GEMMA4_THOUGHT_TOKEN
 
-        needs_injection = (
-            CHANNEL_END in delta_text
-            or delta_text.startswith(_GEMMA4_THOUGHT_PREFIX)
-            or delta_text == _GEMMA4_THOUGHT_TOKEN
-        )
-        if not needs_injection:
-            return delta_text, delta_token_ids
+        # A bare "thought\n"/"thought" prefix at the very start always needs
+        # the channel-start injected, even if the model later emits a stray,
+        # malformed <|channel> further into the same turn (that later token
+        # must not suppress classification of the genuine leading prefix).
+        if not starts_bare:
+            if CHANNEL_START in delta_text:
+                return delta_text, delta_token_ids
+            if CHANNEL_END not in delta_text:
+                return delta_text, delta_token_ids
 
         delta_text = CHANNEL_START + delta_text
         if delta_token_ids:
