@@ -226,6 +226,31 @@ class EngineCore:
 
         self._idle_state_callbacks: list[Callable] = []
 
+        # Bodhan ASR EngineCore ADD coalesce (optional; API-side barrier is
+        # preferred via BODHAN_ENCODER_COALESCE_*). Defaults off to avoid
+        # double-buffering latency.
+        try:
+            self._encode_coalesce_ms = max(
+                0.0, float(os.environ.get("BODHAN_ENGINECORE_COALESCE_MS", "0"))
+            )
+        except ValueError:
+            self._encode_coalesce_ms = 0.0
+        try:
+            self._encode_coalesce_target = max(
+                0, int(os.environ.get("BODHAN_ENGINECORE_COALESCE_TARGET", "0"))
+            )
+        except ValueError:
+            self._encode_coalesce_target = 0
+        self._encode_coalesce_buf: list[tuple[Request, int]] = []
+        self._encode_coalesce_first_ts: float | None = None
+        self._encode_coalesce_last_ts: float | None = None
+        if self._encode_coalesce_ms > 0 or self._encode_coalesce_target > 0:
+            logger.info(
+                "Bodhan EngineCore encode coalesce enabled ms=%.1f target=%d",
+                self._encode_coalesce_ms,
+                self._encode_coalesce_target,
+            )
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -378,12 +403,85 @@ class EngineCore:
             # to free any pre-admission KV-transfer resources.
             self.abort_requests([request.request_id])
 
+    def _encode_coalesce_enabled(self) -> bool:
+        return self._encode_coalesce_ms > 0 or self._encode_coalesce_target > 0
+
+    def _buffer_or_add_request(self, request: Request, request_wave: int = 0) -> None:
+        """Buffer ADD for encode coalesce, or add immediately when disabled."""
+        if not self._encode_coalesce_enabled():
+            self.add_request(request, request_wave)
+            return
+        now = time.monotonic()
+        if self._encode_coalesce_first_ts is None:
+            self._encode_coalesce_first_ts = now
+        self._encode_coalesce_last_ts = now
+        self._encode_coalesce_buf.append((request, request_wave))
+        if (
+            self._encode_coalesce_target > 0
+            and len(self._encode_coalesce_buf) >= self._encode_coalesce_target
+        ):
+            self._flush_encode_coalesce()
+
+    def _flush_encode_coalesce(self) -> None:
+        if not self._encode_coalesce_buf:
+            self._encode_coalesce_first_ts = None
+            self._encode_coalesce_last_ts = None
+            return
+        buf = self._encode_coalesce_buf
+        n = len(buf)
+        self._encode_coalesce_buf = []
+        self._encode_coalesce_first_ts = None
+        self._encode_coalesce_last_ts = None
+        if n >= 8:
+            logger.info("Bodhan encode coalesce flush n=%d", n)
+        for req, wave in buf:
+            self.add_request(req, wave)
+
+    def _encode_coalesce_remaining_s(self) -> float | None:
+        """Seconds until quiet-period deadline, or None if buffer empty.
+
+        Quiet-period coalesce: flush TARGET requests immediately, else flush
+        after COALESCE_MS of no new ADDs (0.5ms quiet when only one request —
+        keeps C1 almost free). Sliding last-arrival extends the wave under load.
+        Cap total wait from first arrival at 200ms (covers CPU-mel FE stagger).
+        """
+        if not self._encode_coalesce_buf:
+            return None
+        assert self._encode_coalesce_last_ts is not None
+        assert self._encode_coalesce_first_ts is not None
+        now = time.monotonic()
+        max_total_s = 0.200
+        total_left = max_total_s - (now - self._encode_coalesce_first_ts)
+        if total_left <= 0:
+            return 0.0
+        n = len(self._encode_coalesce_buf)
+        quiet_s = 0.0005 if n == 1 else max(self._encode_coalesce_ms, 0.5) / 1000.0
+        quiet_left = quiet_s - (now - self._encode_coalesce_last_ts)
+        return max(0.0, min(total_left, quiet_left))
+
+    def _drop_coalesced_aborts(self, request_ids: list[str]) -> None:
+        if not self._encode_coalesce_buf or not request_ids:
+            return
+        abort_set = set(request_ids)
+        kept = [
+            (req, wave)
+            for req, wave in self._encode_coalesce_buf
+            if req.request_id not in abort_set
+        ]
+        if len(kept) == len(self._encode_coalesce_buf):
+            return
+        self._encode_coalesce_buf = kept
+        if not kept:
+            self._encode_coalesce_first_ts = None
+            self._encode_coalesce_last_ts = None
+
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
 
         # TODO: The scheduler doesn't really need to know the
         # specific finish reason, TBD whether we propagate that
         # (i.e. client-aborted vs stop criteria met).
+        self._drop_coalesced_aborts(request_ids)
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
     @contextmanager
@@ -1246,12 +1344,25 @@ class EngineCoreProc(EngineCore):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
             block = self.process_input_queue_block
+            # While coalescing ADDs, poll with a deadline instead of sleeping
+            # in the scheduler — IPC thread keeps accepting requests.
+            coalesce_timeout = self._encode_coalesce_remaining_s()
             try:
-                req = self.input_queue.get(block=block)
+                if coalesce_timeout is not None:
+                    if coalesce_timeout <= 0:
+                        self._flush_encode_coalesce()
+                        break
+                    req = self.input_queue.get(timeout=coalesce_timeout)
+                elif block:
+                    req = self.input_queue.get(block=True)
+                else:
+                    req = self.input_queue.get(block=False)
                 self._handle_client_request(*req)
             except queue.Empty:
+                if coalesce_timeout is not None:
+                    self._flush_encode_coalesce()
                 break
-            if not block:
+            if not block and coalesce_timeout is None:
                 break
 
         if waited:
@@ -1261,6 +1372,40 @@ class EngineCoreProc(EngineCore):
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
+
+        # If the engine already has decode work, still flush any buffered
+        # ADDs so they join the next schedule wave (no extra sleep).
+        if self._encode_coalesce_buf and self.has_work():
+            # Brief non-blocking drain already done; flush now unless under
+            # target and deadline remains — then wait once more for arrivals.
+            remaining = self._encode_coalesce_remaining_s()
+            if (
+                remaining is not None
+                and remaining > 0
+                and (
+                    self._encode_coalesce_target <= 0
+                    or len(self._encode_coalesce_buf) < self._encode_coalesce_target
+                )
+            ):
+                deadline = time.monotonic() + remaining
+                while time.monotonic() < deadline and self.is_running():
+                    if (
+                        self._encode_coalesce_target > 0
+                        and len(self._encode_coalesce_buf)
+                        >= self._encode_coalesce_target
+                    ):
+                        break
+                    try:
+                        req = self.input_queue.get(
+                            timeout=max(0.0, deadline - time.monotonic())
+                        )
+                        self._handle_client_request(*req)
+                    except queue.Empty:
+                        break
+            self._flush_encode_coalesce()
+        elif self._encode_coalesce_buf and not self.has_work():
+            # Idle path already flushed on timeout; flush any leftovers.
+            self._flush_encode_coalesce()
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
@@ -1345,7 +1490,7 @@ class EngineCoreProc(EngineCore):
             req, request_wave = request
             if self._reject_add_in_shutdown(req):
                 return
-            self.add_request(req, request_wave)
+            self._buffer_or_add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:

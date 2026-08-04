@@ -54,6 +54,7 @@ from ..translation.protocol import (
     TranslationSegment,
     TranslationStreamResponse,
 )
+from .encode_coalesce import get_encode_coalesce_barrier
 
 SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 SpeechToTextResponseVerbose: TypeAlias = (
@@ -461,11 +462,19 @@ class OpenAISpeechToText(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_inputs, duration_s = await self._preprocess_speech_to_text(
-            request=request,
-            audio_data=audio_data,
-            request_id=request_id,
-        )
+        coalesce = get_encode_coalesce_barrier()
+        await coalesce.begin()
+        try:
+            engine_inputs, duration_s = await self._preprocess_speech_to_text(
+                request=request,
+                audio_data=audio_data,
+                request_id=request_id,
+            )
+            # After mel FE: wait so concurrent STT submissions form one encode wave.
+            await coalesce.gate()
+        except Exception:
+            await coalesce.end()
+            raise
 
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
@@ -549,7 +558,13 @@ class OpenAISpeechToText(OpenAIServing):
                 self.engine_client.abort(engine_request_ids),
                 return_exceptions=True,
             )
+            await coalesce.end()
             raise
+        except Exception:
+            await coalesce.end()
+            raise
+        else:
+            await coalesce.end()
 
         separator = asr_inter_chunk_separator(
             request.language, self.model_cls.no_space_languages

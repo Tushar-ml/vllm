@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
 import math
+import os
 import random
 
 import numpy as np
@@ -55,7 +56,7 @@ class FilterbankFeatures(nn.Module):
         rng=None,
         nb_augmentation_prob=0.0,
         nb_max_freq=4000,
-        mel_norm="slaney",
+        mel_norm=None,
         stft_exact_pad=False,
         stft_conv=False,
         device="cpu",
@@ -135,7 +136,7 @@ class FilterbankFeatures(nn.Module):
             f_max=highfreq,
             n_mels=nfilt,
             sample_rate=sample_rate,
-            norm=mel_norm,
+            norm=mel_norm if mel_norm is not None else "slaney",
             mel_scale="slaney",
         ).T.unsqueeze(0)
         self.register_buffer("fb", filterbanks)
@@ -448,10 +449,10 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
         mag_power=2.0,
         nb_augmentation_prob=0.0,
         nb_max_freq=4000,
-        mel_norm="slaney",
+        mel_norm=None,
         stft_exact_pad=False,
         stft_conv=False,
-        device="cpu",
+        device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
         **kwargs,
     ):
         super().__init__(
@@ -489,7 +490,7 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
             mel_norm=mel_norm,
             stft_exact_pad=stft_exact_pad,
             stft_conv=stft_conv,
-            device=device,
+            device=str(self._device),
         )
         self._filterbank: FilterbankFeatures | None = None
 
@@ -499,10 +500,19 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
             fb = FilterbankFeatures(**self._fb_config)
             fb.eval()
             self._filterbank = fb.to(self._device)
+        else:
+            self._filterbank = self._filterbank.to(self._device)
         return self._filterbank
 
     def get_seq_len(self, seq_len):
         return self.filterbank.get_seq_len(seq_len)
+
+    def to_device(self, device: str | torch.device) -> "CohereASRFeatureExtractor":
+        self._device = torch.device(device)
+        self._fb_config["device"] = str(self._device)
+        if self._filterbank is not None:
+            self._filterbank = self._filterbank.to(self._device)
+        return self
 
     def __call__(
         self,
@@ -521,20 +531,52 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
         for i, s in enumerate(raw_speech):
             padded[i, : s.shape[0]] = s
 
+        # Mel device: cuda is production default (matches serve_bodhan_vllm.sh).
+        # Use cpu with API coalesce under load. (auto→cuda; no mid-run switch.)
+        mel_device = os.environ.get("BODHAN_MEL_DEVICE", "cuda").lower()
+        if mel_device == "auto":
+            mel_device = "cuda"
+        if mel_device == "cuda" and torch.cuda.is_available():
+            if self._device.type != "cuda":
+                self.to_device("cuda")
+        elif self._device.type != "cpu":
+            self.to_device("cpu")
+
         audio_tensor = torch.from_numpy(padded).to(self._device)
         seq_len = seq_len.to(self._device)
 
         with torch.no_grad():
             input_features, length = self.filterbank(audio_tensor, seq_len)
 
+        # Stage host tensors for API→EngineCore IPC. When mel ran on CUDA,
+        # use pinned async D2H; CPU mel is already host-resident.
+        def _host_stage(t: torch.Tensor) -> torch.Tensor:
+            t = t.detach().contiguous()
+            if t.device.type != "cuda":
+                if not t.is_pinned() and torch.cuda.is_available():
+                    try:
+                        return t.pin_memory()
+                    except RuntimeError:
+                        return t
+                return t
+            host = torch.empty(t.shape, dtype=t.dtype, device="cpu", pin_memory=True)
+            host.copy_(t, non_blocking=True)
+            return host
+
+        input_features = _host_stage(input_features)
+        length = _host_stage(length)
+        if torch.cuda.is_available() and mel_device == "cuda":
+            torch.cuda.current_stream().synchronize()
+
         result = BatchFeature(
-            {"input_features": input_features.cpu(), "length": length.cpu()}
+            {
+                "input_features": input_features,
+                "length": length,
+            }
         )
         if return_tensors is not None:
             result = result.convert_to_tensors(return_tensors)
         return result
-
-
 class CohereASRProcessor(ProcessorMixin):
     """HF-compatible processor combining CohereASRFeatureExtractor and a
     tokenizer."""

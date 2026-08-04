@@ -491,11 +491,14 @@ class MultiModalBatchedField(BaseMultiModalField):
                 return batch[0].unsqueeze(0).contiguous()
             first_shape = batch[0].shape
             if all(elem.shape == first_shape for elem in batch):
+                # pin_memory only valid for host tensors; GPU-resident mel
+                # (Bodhan CohereASR) must stay on CUDA without pinning.
+                use_pin = pin_memory and batch[0].device.type == "cpu"
                 out = torch.empty(
                     (len(batch), *batch[0].shape),
                     dtype=batch[0].dtype,
                     device=batch[0].device,
-                    pin_memory=pin_memory,
+                    pin_memory=use_pin,
                 )
                 return torch.stack(batch, out=out)
 
@@ -550,11 +553,12 @@ class MultiModalFlatField(BaseMultiModalField):
             if all(_shape_before_after(elem) == first_shape for elem in batch):
                 shape_before, shape_after = first_shape
                 shape_concat = sum(item.shape[dim] for item in batch)
+                use_pin = pin_memory and batch[0].device.type == "cpu"
                 out = torch.empty(
                     (*shape_before, shape_concat, *shape_after),
                     dtype=batch[0].dtype,
                     device=batch[0].device,
-                    pin_memory=pin_memory,
+                    pin_memory=use_pin,
                 )
                 return torch.concat(batch, dim=self.dim, out=out)
 
@@ -576,11 +580,12 @@ class MultiModalFlatField(BaseMultiModalField):
                     max_sizes.append(max(t.shape[d] for t in batch))
 
             # Step 2: Create zero-initialized output tensor
+            use_pin = pin_memory and batch[0].device.type == "cpu"
             out = torch.zeros(
                 max_sizes,
                 dtype=batch[0].dtype,
                 device=batch[0].device,
-                pin_memory=pin_memory,
+                pin_memory=use_pin,
             )
 
             # Step 3: Slice-assign each tensor to its proper position

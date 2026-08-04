@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import math
+import os
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, ClassVar
 
@@ -10,7 +12,10 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
@@ -85,6 +90,21 @@ ISO639_1_SUPPORTED_LANGS = {
     "ja": "Japanese",
     "vi": "Vietnamese",
     "zh": "Chinese",
+    # Bodhan Indic / regional (must also exist in interfaces.LANGUAGES)
+    "hi": "Hindi",
+    "bn": "Bengali",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "mr": "Marathi",
+    "gu": "Gujarati",
+    "pa": "Punjabi",
+    "ur": "Urdu",
+    "as": "Assamese",
+    "ne": "Nepali",
+    "sa": "Sanskrit",
+    "sd": "Sindhi",
 }
 
 
@@ -242,12 +262,16 @@ class CohereASRCrossAttention(CohereASRAttention):
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
+        precomputed_kv: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q, _ = self.q_proj(hidden_states)
 
         # Encoder hidden states are only computed once during prefill phase.
         # Afterwards, the keys and values should be available in the kv-cache.
-        if encoder_hidden_states is not None:
+        if precomputed_kv is not None:
+            kv = precomputed_kv
+            k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
+        elif encoder_hidden_states is not None:
             kv, _ = self.kv_proj(encoder_hidden_states)
             k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
         else:
@@ -374,6 +398,7 @@ class CohereASRDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
+        precomputed_cross_kv: torch.Tensor | None = None,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.layer_norm_1(hidden_states)
@@ -385,6 +410,7 @@ class CohereASRDecoderLayer(nn.Module):
         hidden_states = self.second_sub_layer(
             hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
+            precomputed_kv=precomputed_cross_kv,
         )
 
         hidden_states = residual + hidden_states
@@ -455,11 +481,50 @@ class CohereASRDecoder(nn.Module):
         encoder_hidden_states: torch.Tensor | None,
     ) -> torch.Tensor:
         hidden_states = self.get_input_embeddings(input_ids, positions)
-        for decoder_layer in self.layers:
-            hidden_states = decoder_layer(
-                hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-            )
+
+        precomputed_kvs: list[torch.Tensor] | None = None
+        if (
+            encoder_hidden_states is not None
+            and os.environ.get("BODHAN_FUSED_CROSS_KV", "1") == "1"
+            and len(self.layers) > 0
+        ):
+            # One stacked GEMM for all decoder layers' cross kv_proj.
+            try:
+                ws = torch.stack(
+                    [layer.second_sub_layer.kv_proj.weight for layer in self.layers]
+                )
+                bs = torch.stack(
+                    [layer.second_sub_layer.kv_proj.bias for layer in self.layers]
+                )
+                from vllm.model_executor.models.bodhan_asr_kernels import (
+                    fused_cross_kv_proj,
+                )
+
+                # weights may be [O, D] (nn.Linear) — stack → [L, O, D]
+                precomputed_kvs_t = fused_cross_kv_proj(
+                    encoder_hidden_states, ws, bs
+                )
+                precomputed_kvs = [
+                    precomputed_kvs_t[i] for i in range(precomputed_kvs_t.shape[0])
+                ]
+            except Exception as exc:
+                logger.warning_once(
+                    "BODHAN_FUSED_CROSS_KV disabled after init failure: %s", exc
+                )
+                precomputed_kvs = None
+
+        for li, decoder_layer in enumerate(self.layers):
+            if precomputed_kvs is not None:
+                hidden_states = decoder_layer(
+                    hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    precomputed_cross_kv=precomputed_kvs[li],
+                )
+            else:
+                hidden_states = decoder_layer(
+                    hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                )
 
         hidden_states = self.final_layer_norm(hidden_states)
         return hidden_states
@@ -1029,30 +1094,21 @@ class CohereASRMultiHeadAttention(nn.Module):
     ) -> torch.Tensor:
         """Compute attention context vector.
         Args:
-            value (torch.Tensor): (batch, time2, size)
-            scores(torch.Tensor): (batch, time1, time2)
+            value (torch.Tensor): (batch, head, time2, d_k)
+            scores(torch.Tensor): (batch, head, time1, time2)
             mask(torch.Tensor): (batch, time1, time2)
-        returns:
-            value (torch.Tensor): transformed `value`
-                (batch, time2, d_model) weighted by the
-                attention scores
         """
         n_batch = value.size(0)
         if mask is not None:
-            mask = mask.unsqueeze(1)  # (batch, 1, time1, time2)
-            scores = scores.masked_fill(mask, -INF_VAL)
-            attn = torch.softmax(scores, dim=-1).masked_fill(
-                mask, 0.0
-            )  # (batch, head, time1, time2)
+            mask_h = mask.unsqueeze(1)  # (batch, 1, time1, time2)
+            scores = scores.masked_fill(mask_h, -INF_VAL)
+            attn = torch.softmax(scores, dim=-1).masked_fill(mask_h, 0.0)
         else:
-            attn = torch.softmax(scores, dim=-1)  # (batch, head, time1, time2)
+            attn = torch.softmax(scores, dim=-1)
 
         x = torch.matmul(attn, value)  # (batch, head, time1, d_k)
-        x = x.transpose(1, 2).reshape(
-            n_batch, -1, self.h * self.d_k
-        )  # (batch, time1, d_model)
-
-        return self.linear_out(x)  # (batch, time1, d_model)
+        x = x.transpose(1, 2).reshape(n_batch, -1, self.h * self.d_k)
+        return self.linear_out(x)
 
     def forward(
         self,
@@ -1062,22 +1118,25 @@ class CohereASRMultiHeadAttention(nn.Module):
         mask: torch.Tensor | None,
         pos_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute 'Scaled Dot Product Attention'.
-        Args:
-            query (torch.Tensor): (batch, time1, size)
-            key (torch.Tensor): (batch, time2, size)
-            value(torch.Tensor): (batch, time2, size)
-            mask (torch.Tensor): (batch, time1, time2)
-
-        returns:
-            output (torch.Tensor): transformed `value`
-                (batch, time1, d_model) weighted by the
-                query dot key attention
-        """
+        """Compute scaled dot-product attention via SDPA kernels."""
         q, k, v = self.forward_qkv(query, key, value)
-
-        scores = torch.matmul(q, k.transpose(-2, -1)) / self.s_d_k
-        return self.forward_attention(v, scores, mask)
+        attn_mask = None
+        if mask is not None:
+            # Additive pad mask (True = blocked).
+            attn_mask = torch.zeros(
+                mask.size(0),
+                1,
+                mask.size(1),
+                mask.size(2),
+                device=q.device,
+                dtype=q.dtype,
+            )
+            attn_mask = attn_mask.masked_fill(mask.unsqueeze(1), -INF_VAL)
+        x = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, scale=1.0 / self.s_d_k
+        )
+        x = x.transpose(1, 2).reshape(q.size(0), -1, self.h * self.d_k)
+        return self.linear_out(x)
 
 
 class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
@@ -1142,46 +1201,35 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         mask: torch.Tensor | None,
         pos_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute 'Scaled Dot Product Attention' with rel. positional encoding.
-        Args:
-            query (torch.Tensor): (batch, time1, size)
-            key (torch.Tensor): (batch, time2, size)
-            value(torch.Tensor): (batch, time2, size)
-            mask (torch.Tensor): (batch, time1, time2)
-            pos_emb (torch.Tensor) : (batch, time1, size)
-
-        Returns:
-            output (torch.Tensor): transformed `value`
-                (batch, time1, d_model) weighted by the
-                query dot key attention
-        """
+        """Rel-pos attention: content SDPA + relative bias (NeMo algebra)."""
         q, k, v = self.forward_qkv(query, key, value)
         q = q.transpose(1, 2)  # (batch, time1, head, d_k)
 
+        pos_emb = pos_emb.to(dtype=q.dtype)
         n_batch_pos = pos_emb.size(0)
         p = self.linear_pos(pos_emb).view(n_batch_pos, -1, self.h, self.d_k)
-        p = p.transpose(1, 2)  # (batch, head, time1, d_k)
+        p = p.transpose(1, 2)  # (batch, head, time_pos, d_k)
 
-        # (batch, head, time1, d_k)
-        q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2)
-        # (batch, head, time1, d_k)
-        q_with_bias_v = (q + self.pos_bias_v).transpose(1, 2)
+        q_with_bias_u = (q + self.pos_bias_u.to(dtype=q.dtype)).transpose(1, 2)
+        q_with_bias_v = (q + self.pos_bias_v.to(dtype=q.dtype)).transpose(1, 2)
 
-        # compute attention score
-        # first compute matrix a and matrix c
-        # as described in https://arxiv.org/abs/1901.02860 Section 3.3
-        # (batch, head, time1, time2)
-
-        # compute matrix b and matrix d
-        # (batch, head, time1, time2)
+        # Relative bias term (matrix b+d), then SDPA for (a+c)+bias.
         matrix_bd = torch.matmul(q_with_bias_v, p.transpose(-2, -1))
         matrix_bd = self.rel_shift(matrix_bd)
+        matrix_bd = matrix_bd[:, :, :, : k.size(-2)]
+        attn_bias = matrix_bd / self.s_d_k
+        if mask is not None:
+            attn_bias = attn_bias.masked_fill(mask.unsqueeze(1), -INF_VAL)
 
-        # drops extra elements in the matrix_bd to match the matrix_ac's size
-        matrix_ac = torch.matmul(q_with_bias_u, k.transpose(-2, -1))
-        matrix_bd = matrix_bd[:, :, :, : matrix_ac.size(-1)]
-        scores = (matrix_ac + matrix_bd) / self.s_d_k  # (batch, head, time1, time2)
-        return self.forward_attention(v, scores, mask)
+        x = F.scaled_dot_product_attention(
+            q_with_bias_u,
+            k,
+            v,
+            attn_mask=attn_bias,
+            scale=1.0 / self.s_d_k,
+        )
+        x = x.transpose(1, 2).reshape(q.size(0), -1, self.h * self.d_k)
+        return self.linear_out(x)
 
 
 class ConformerLayer(torch.nn.Module):
@@ -1321,6 +1369,10 @@ class ConformerLayer(torch.nn.Module):
         return x
 
 
+@support_torch_compile(
+    dynamic_arg_dims={"audio_signal": [0, 2], "length": 0},
+    enable_if=should_torch_compile_mm_encoder,
+)
 class ConformerEncoder(nn.Module):
     """
     The encoder for ASR model of Conformer.
@@ -1705,6 +1757,109 @@ class ConformerEncoder(nn.Module):
 # ----- Encoder END -----
 
 
+# Mel-frame buckets for Hindi bench durations (4–10s @ 10 ms hop) + headroom.
+_ENCODER_MEL_BUCKETS = (400, 500, 600, 700, 800, 1000, 1200, 1600)
+
+
+def _bucket_mel_frames(t: int) -> int | None:
+    for b in _ENCODER_MEL_BUCKETS:
+        if t <= b:
+            return b
+    return None
+
+
+class _EncoderCudaGraphCache:
+    """Fixed-shape CUDA graph cache for ConformerEncoder (B=1 buckets)."""
+
+    def __init__(self) -> None:
+        self._graphs: dict[tuple, object] = {}
+        self._enabled = torch.cuda.is_available()
+
+    def run(
+        self,
+        encoder: nn.Module,
+        input_features: torch.Tensor,
+        seq_lens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if (
+            not self._enabled
+            or input_features.device.type != "cuda"
+            or input_features.size(0) != 1
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return encoder(input_features, length=seq_lens)
+
+        b, f, t = input_features.shape
+        bucket = _bucket_mel_frames(int(t))
+        if bucket is None:
+            return encoder(input_features, length=seq_lens)
+
+        key = (b, f, bucket, input_features.dtype, str(input_features.device))
+        if key not in self._graphs:
+            try:
+                static_in = torch.zeros(
+                    b,
+                    f,
+                    bucket,
+                    device=input_features.device,
+                    dtype=input_features.dtype,
+                )
+                static_len = torch.zeros(
+                    b, device=seq_lens.device, dtype=seq_lens.dtype
+                )
+                if t < bucket:
+                    static_in[:, :, :t].copy_(input_features)
+                else:
+                    static_in.copy_(input_features)
+                static_len.copy_(seq_lens)
+                for _ in range(3):
+                    out_w, len_w = encoder(static_in, length=static_len)
+                static_out = torch.empty_like(out_w)
+                static_out_len = torch.empty_like(len_w)
+
+                g = torch.cuda.CUDAGraph()
+                torch.cuda.synchronize()
+                with torch.cuda.graph(g):
+                    out_c, len_c = encoder(static_in, length=static_len)
+                    static_out.copy_(out_c)
+                    static_out_len.copy_(len_c)
+                self._graphs[key] = (
+                    g,
+                    static_in,
+                    static_len,
+                    static_out,
+                    static_out_len,
+                )
+                logger.info(
+                    "Captured Conformer encoder CUDA graph bucket mel_T=%s dtype=%s",
+                    bucket,
+                    input_features.dtype,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "Encoder CUDA graph capture failed for mel_T=%s (%s); "
+                    "falling back to eager/compiled forward",
+                    bucket,
+                    e,
+                )
+                self._graphs[key] = None  # type: ignore[assignment]
+                return encoder(input_features, length=seq_lens)
+
+        entry = self._graphs[key]
+        if entry is None:
+            return encoder(input_features, length=seq_lens)
+
+        g, static_in, static_len, static_out, static_out_len = entry
+        if t < bucket:
+            static_in.zero_()
+            static_in[:, :, :t].copy_(input_features)
+        else:
+            static_in.copy_(input_features)
+        static_len.copy_(seq_lens)
+        g.replay()
+        return static_out, static_out_len
+
+
 # This subclass is specific to vLLM in order for
 # `_mark_composite_model` to target this module
 class CohereASRProjector(nn.Linear):
@@ -1715,6 +1870,9 @@ class CohereASRModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.encoder = ConformerEncoder(vllm_config=vllm_config)
+        self._encoder_cg = _EncoderCudaGraphCache()
+        self._trt_encoder = None
+        self._trt_encoder_failed = False
 
         self.decoder = CohereASRDecoder(
             vllm_config=vllm_config,
@@ -1724,6 +1882,52 @@ class CohereASRModel(nn.Module):
         if self.encoder.d_model != self.decoder.hidden_size:
             self.encoder_decoder_proj = CohereASRProjector(
                 self.encoder.d_model, self.decoder.hidden_size
+            )
+
+        # Classic TRT Conformer (incl. Identity proj for Bodhan). Opt-in via env.
+        if self._trt_encoder_requested():
+            self._maybe_init_trt_encoder()
+
+    @staticmethod
+    def _trt_encoder_requested() -> bool:
+        # Default on (matches serve_bodhan_vllm.sh). Set BODHAN_TRT_ENCODER=0 for torch.
+        return os.environ.get("BODHAN_TRT_ENCODER", "1") != "0"
+
+    def _maybe_init_trt_encoder(self) -> None:
+        if self._trt_encoder is not None or self._trt_encoder_failed:
+            return
+        engine_path = os.environ.get(
+            "TRT_ENCODER_PATH",
+            "/home/ubuntu/bodhan-litserve-trt/artifacts/bodhan_encoder_fp16.engine",
+        )
+        try:
+            from trt_encoder import get_trt_encoder
+
+            self._trt_encoder = get_trt_encoder(engine_path)
+            try:
+                from vllm.model_executor.models.bodhan_asr_kernels import (
+                    warmup_pack_shapes,
+                )
+
+                warmup_pack_shapes()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Bodhan pack kernel warmup skipped: %s", exc)
+            # Free VRAM for paged KV — torch Conformer unused when TRT is live.
+            self.encoder.to("cpu")
+            if hasattr(self, "encoder_decoder_proj"):
+                self.encoder_decoder_proj.to("cpu")
+            logger.info(
+                "Bodhan TRT encoder enabled path=%s pool=%s "
+                "(torch Conformer offloaded to CPU)",
+                engine_path,
+                getattr(self._trt_encoder, "pool_size", 1),
+            )
+        except Exception as e:
+            self._trt_encoder_failed = True
+            logger.warning(
+                "BODHAN_TRT_ENCODER requested but init failed (%s); "
+                "falling back to torch Conformer",
+                e,
             )
 
     def forward(
@@ -1750,22 +1954,88 @@ class CohereASRModel(nn.Module):
             return None
 
         if isinstance(input_features, torch.Tensor):
+            if self._trt_encoder_requested():
+                self._maybe_init_trt_encoder()
+            # Classic TRT engine profile: B∈[1,256], mel_T∈[100,1600].
+            # Pack max_audio_clip_s=16 keeps profile/dummy in-range. Longer
+            # inputs fall back to torch Conformer.
+            if self._trt_encoder is not None:
+                b, _f, t = input_features.shape
+                trt_max_t = int(os.environ.get("BODHAN_TRT_MAX_MEL_T", "1600"))
+                trt_min_t = 100
+                if 1 <= b <= 256 and trt_min_t <= t <= trt_max_t:
+                    mel = input_features
+                    if mel.dtype != torch.float32:
+                        mel = mel.float()
+                    lengths = seq_lens
+                    if lengths is None:
+                        lengths = torch.full(
+                            (b,),
+                            t,
+                            dtype=torch.int64,
+                            device=mel.device,
+                        )
+                    try:
+                        enc_dev = next(self.encoder.parameters()).device
+                        if enc_dev.type == "cuda":
+                            self.encoder.to("cpu")
+                            if hasattr(self, "encoder_decoder_proj"):
+                                self.encoder_decoder_proj.to("cpu")
+                    except StopIteration:
+                        pass
+                    if os.environ.get("BODHAN_PROFILE_ENCODE", "0") == "1":
+                        torch.cuda.synchronize()
+                        import time as _time
+
+                        _t0 = _time.perf_counter()
+                    # Contiguous fp32 mel for TRT; lengths stay on device.
+                    mel = mel.contiguous()
+                    lengths = lengths.contiguous()
+                    enc_states, _enc_mask, encoded_len = self._trt_encoder(
+                        mel, lengths
+                    )
+                    if os.environ.get("BODHAN_PROFILE_ENCODE", "0") == "1":
+                        torch.cuda.synchronize()
+                        logger.info(
+                            "TRT encode B=%s mel_T=%s wall_ms=%.2f",
+                            b,
+                            t,
+                            (_time.perf_counter() - _t0) * 1000.0,
+                        )
+                    out_dtype = next(self.decoder.parameters()).dtype
+                    from vllm.model_executor.models.bodhan_asr_kernels import (
+                        pack_encoder_outputs,
+                    )
+
+                    # Distribute: pack [B,T,D] → per-request [T_i,D] for decoder.
+                    return pack_encoder_outputs(
+                        enc_states, encoded_len, out_dtype=out_dtype
+                    )
+
+            # Torch path (also OOR fallback).
+            try:
+                enc_dev = next(self.encoder.parameters()).device
+                if enc_dev.type != "cuda" and input_features.device.type == "cuda":
+                    self.encoder.to(input_features.device)
+                    if hasattr(self, "encoder_decoder_proj"):
+                        self.encoder_decoder_proj.to(input_features.device)
+            except StopIteration:
+                pass
+
             encoder_input_length = seq_lens
-            out, encoder_output_length = self.encoder(
-                input_features, length=encoder_input_length
+            out, encoder_output_length = self._encoder_cg.run(
+                self.encoder, input_features, encoder_input_length
             )  # B x D x T
             out = out.permute(0, 2, 1)
 
             if hasattr(self, "encoder_decoder_proj"):
                 out = self.encoder_decoder_proj(out)
 
-            # Convert padded tensor to packed
-            outs = []
-            for i, feat in enumerate(out):
-                feat_len = encoder_output_length[i]
-                outs.append(feat[:feat_len, :])
+            from vllm.model_executor.models.bodhan_asr_kernels import (
+                pack_encoder_outputs,
+            )
 
-            return outs
+            return pack_encoder_outputs(out, encoder_output_length)
         else:
             raise NotImplementedError("List input_features not supported")
 
@@ -1838,11 +2108,25 @@ class CohereASRProcessingInfo(BaseProcessingInfo):
             window_size = preproc.get("window_size", 0.02)
             window_stride = preproc.get("window_stride", 0.01)
 
+            max_clip = float(
+                os.environ.get(
+                    "BODHAN_MAX_AUDIO_CLIP_S",
+                    str(hf_config.max_audio_clip_s),
+                )
+            )
+            # Expose for CrossAttentionSpec / CUDA-graph capture sizing.
+            if not hasattr(hf_config, "max_source_positions") or os.environ.get(
+                "BODHAN_MAX_AUDIO_CLIP_S"
+            ):
+                hf_config.max_source_positions = int(
+                    math.ceil(max_clip * 100.0 / 8.0) + 2
+                )
+
             feature_extractor = CohereASRFeatureExtractor(
                 feature_size=preproc.get("features", 64),
                 sampling_rate=sample_rate,
                 padding_value=preproc.get("pad_value", 0.0),
-                max_duration=hf_config.max_audio_clip_s,
+                max_duration=max_clip,
                 n_window_size=int(window_size * sample_rate),
                 n_window_stride=int(window_stride * sample_rate),
                 window=preproc.get("window", "hann"),
@@ -1909,7 +2193,7 @@ class CohereASRDummyInputsBuilder(BaseDummyInputsBuilder[CohereASRProcessingInfo
         feature_extractor = self.info.get_feature_extractor()
 
         sampling_rate = feature_extractor.sampling_rate
-        audio_len = feature_extractor.max_duration * sampling_rate
+        audio_len = int(feature_extractor.max_duration * sampling_rate)
         num_audios = mm_counts.get("audio", 0)
 
         return {
@@ -2062,6 +2346,7 @@ class CohereAsrForConditionalGeneration(
     def _get_default_prompt_tokens(cls, language: str) -> tuple[str, ...]:
         # Use token-level control tags so fast tokenizers do not have to parse
         # the raw string form of the decoder prefix.
+        # Bodhan canary2 also includes <|noromanize|> between itn and timestamp.
         return (
             "▁",
             "<|startofcontext|>",
@@ -2071,9 +2356,38 @@ class CohereAsrForConditionalGeneration(
             f"<|{language}|>",
             "<|pnc|>",
             "<|noitn|>",
+            "<|noromanize|>",
             "<|notimestamp|>",
             "<|nodiarize|>",
         )
+
+    @classmethod
+    def _load_bodhan_prompt_ids(
+        cls, model_config: ModelConfig, language: str
+    ) -> list[int] | None:
+        """Load gold canary2 dialog IDs from pack-side prompt_ids.json if present."""
+        model_path = getattr(model_config, "model", None) or getattr(
+            model_config, "tokenizer", None
+        )
+        if not model_path:
+            return None
+        from pathlib import Path
+
+        hf = getattr(model_config, "hf_config", None)
+        fname = "prompt_ids.json"
+        if hf is not None:
+            fname = getattr(hf, "bodhan_prompt_ids_file", None) or fname
+        path = Path(str(model_path)) / str(fname)
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text())
+        except Exception:  # noqa: BLE001
+            return None
+        ids = data.get(language) or data.get(language.lower())
+        if not ids:
+            return None
+        return [int(x) for x in ids]
 
     @classmethod
     def _get_default_prompt_token_ids(
@@ -2089,10 +2403,19 @@ class CohereAsrForConditionalGeneration(
         )
         prompt_token_ids = cls._default_prompt_token_ids_cache.get(cache_key)
         if prompt_token_ids is None:
+            # Prefer bit-exact NeMo encode_dialog dumps (Bodhan canary2).
+            gold = cls._load_bodhan_prompt_ids(model_config, language)
+            if gold is not None:
+                prompt_token_ids = tuple(gold)
+                cls._default_prompt_token_ids_cache[cache_key] = prompt_token_ids
+                return list(prompt_token_ids)
+
             prompt_tokens = list(cls._get_default_prompt_tokens(language))
             token_ids = tokenizer.convert_tokens_to_ids(prompt_tokens)
             if not isinstance(token_ids, list):
                 token_ids = [token_ids]
+            # Stock Cohere packs include a leading "▁"; Bodhan gold prompts do not.
+            # Drop leading ▁ if it resolved to unk / optional.
             unk_token_id = getattr(tokenizer, "unk_token_id", None)
             if unk_token_id is not None and any(
                 token_id == unk_token_id for token_id in token_ids
@@ -2120,8 +2443,17 @@ class CohereAsrForConditionalGeneration(
     ) -> SpeechToTextConfig:
         sampling_rate = model_config.hf_config.sample_rate
         assert sampling_rate == 16000
-        max_audio_clip_s = model_config.hf_config.max_audio_clip_s
+        max_audio_clip_s = float(
+            os.environ.get(
+                "BODHAN_MAX_AUDIO_CLIP_S",
+                str(model_config.hf_config.max_audio_clip_s),
+            )
+        )
         overlap_chunk_second = model_config.hf_config.overlap_chunk_second
+        # Keep CrossAttentionSpec / graph capture aligned with clip cap.
+        model_config.hf_config.max_source_positions = int(
+            math.ceil(max_audio_clip_s * 100.0 / 8.0) + 2
+        )
 
         return SpeechToTextConfig(
             max_audio_clip_s=max_audio_clip_s,

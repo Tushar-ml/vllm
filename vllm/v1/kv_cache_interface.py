@@ -7,6 +7,7 @@ import copy
 from collections import Counter
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
+import math
 from math import prod
 from typing import TYPE_CHECKING
 
@@ -659,10 +660,39 @@ class CrossAttentionSpec(AttentionSpec):
     """
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        # For cross-attention, we need to cache encoder states
-        # Get encoder length (e.g., 1500 for Whisper).
-        max_encoder_len = vllm_config.scheduler_config.max_num_encoder_input_tokens
+        # For cross-attention, we need to cache encoder states.
+        # Prefer model-specific max encoder length (Whisper max_source_positions,
+        # Bodhan/CohereASR max_audio_clip_s → subsampled frames) over the
+        # scheduler's max_num_encoder_input_tokens (== max_num_batched_tokens),
+        # which otherwise sizes every request's cross-KV to the full encode
+        # batch budget and collapses concurrency.
+        max_encoder_len = _cross_attn_max_encoder_len(vllm_config)
         return cdiv(max_encoder_len, self.block_size) * self.page_size_bytes
+
+
+def _cross_attn_max_encoder_len(vllm_config: VllmConfig) -> int:
+    import os
+
+    env = os.environ.get("BODHAN_MAX_ENCODER_LEN")
+    if env:
+        return max(1, int(env))
+
+    hf = getattr(vllm_config.model_config, "hf_config", None)
+    if hf is not None:
+        msp = getattr(hf, "max_source_positions", None)
+        if msp is not None:
+            return max(1, int(msp))
+
+        max_clip = os.environ.get("BODHAN_MAX_AUDIO_CLIP_S")
+        if max_clip is None:
+            max_clip = getattr(hf, "max_audio_clip_s", None)
+        if max_clip is not None:
+            # 10 ms hop → 100 mel frames/s; Conformer ×8 subsampling.
+            # 10s → 125 enc tokens; pad slightly for pad_to / rounding.
+            clip_s = float(max_clip)
+            return max(1, int(math.ceil(clip_s * 100.0 / 8.0)) + 2)
+
+    return vllm_config.scheduler_config.max_num_encoder_input_tokens
 
 
 @dataclass(frozen=True)
