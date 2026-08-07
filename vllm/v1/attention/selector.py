@@ -123,6 +123,30 @@ def _cached_get_attn_backend(
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
     )
+    if (
+        envs.VLLM_MEGAKERNEL_ON
+        and attn_selector_config.attn_type == AttentionType.DECODER
+        and not attn_selector_config.use_mla
+        and not attn_selector_config.use_sparse
+    ):
+        from vllm.config import get_current_vllm_config
+        from vllm.model_executor.models.megakernel_spec import (
+            get_megakernel_family_id,
+            validate_megakernel_family_hf_only_or_raise,
+        )
+
+        try:
+            model_config = get_current_vllm_config().model_config
+            family_id = get_megakernel_family_id(model_config)
+            if family_id and family_id in set(envs.VLLM_MEGAKERNEL_FAMILIES):
+                validate_megakernel_family_hf_only_or_raise(family_id, model_config)
+                attention_cls = (
+                    "vllm.v1.attention.backends.megakernel_attn."
+                    "MegakernelAttentionBackend"
+                )
+        except Exception:
+            # Keep default backend if model/shape does not match MK constraints.
+            pass
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}"

@@ -276,6 +276,15 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
+    VLLM_MEGAKERNEL_ON: bool = False
+    VLLM_MEGAKERNEL_STRICT: bool = True
+    VLLM_MEGAKERNEL_FAMILIES: list[str] = ["llama_small"]
+    VLLM_MEGAKERNEL_ROOT: str = ""
+    VLLM_MEGAKERNEL_MK_LLAMA_PATH: str = ""
+    VLLM_MEGAKERNEL_MAX_LEN: int = 4096
+    VLLM_MEGAKERNEL_MAX_BATCH_SIZE: int = 4
+    VLLM_MEGAKERNEL_PARITY_TOKENS: int = 0
+    VLLM_MEGAKERNEL_ALLOW_TRITON_FALLBACK: bool = False
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
@@ -1913,6 +1922,37 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
         os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
     ),
+    # Megakernels fused Llama 1B integration.
+    "VLLM_MEGAKERNEL_ON": lambda: os.getenv("VLLM_MEGAKERNEL_ON", "")
+    .strip()
+    .lower()
+    in ("1", "true"),
+    "VLLM_MEGAKERNEL_STRICT": lambda: os.getenv("VLLM_MEGAKERNEL_STRICT", "1")
+    .strip()
+    .lower()
+    in ("1", "true"),
+    "VLLM_MEGAKERNEL_FAMILIES": lambda: [
+        family.strip()
+        for family in os.getenv("VLLM_MEGAKERNEL_FAMILIES", "llama_small").split(",")
+        if family.strip()
+    ],
+    "VLLM_MEGAKERNEL_ROOT": lambda: os.getenv("VLLM_MEGAKERNEL_ROOT", ""),
+    "VLLM_MEGAKERNEL_MK_LLAMA_PATH": lambda: os.getenv(
+        "VLLM_MEGAKERNEL_MK_LLAMA_PATH", ""
+    ),
+    "VLLM_MEGAKERNEL_MAX_LEN": lambda: int(os.getenv("VLLM_MEGAKERNEL_MAX_LEN", "4096")),
+    "VLLM_MEGAKERNEL_MAX_BATCH_SIZE": lambda: int(
+        os.getenv("VLLM_MEGAKERNEL_MAX_BATCH_SIZE", "4")
+    ),
+    "VLLM_MEGAKERNEL_PARITY_TOKENS": lambda: int(
+        os.getenv("VLLM_MEGAKERNEL_PARITY_TOKENS", "0")
+    ),
+    "VLLM_MEGAKERNEL_ALLOW_TRITON_FALLBACK": lambda: os.getenv(
+        "VLLM_MEGAKERNEL_ALLOW_TRITON_FALLBACK", "0"
+    )
+    .strip()
+    .lower()
+    in ("1", "true"),
     # Whether enable XPU graph on Intel GPU
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
