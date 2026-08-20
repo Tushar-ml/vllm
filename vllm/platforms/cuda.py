@@ -407,6 +407,30 @@ class CudaPlatformBase(Platform):
         device_capability = cls.get_device_capability()
         assert device_capability is not None
 
+        # FA4's SM90 fp8-KV-dequant kernel (vllm-project/flash-attention#164) is
+        # correct only for head_dim 512, its stated scope. At head_dim 256 with a
+        # sliding window it disagrees with the same kernel on a torch-dequantized
+        # cache by ~0.5 (tolerance 8e-3) as soon as more than one K/V block is in
+        # range -- independent of num_splits and of tile_mn. vLLM's page-size gate
+        # keys on a model-level head_size == 512, so on gemma-4 all 56 hd256
+        # sliding layers are dragged onto it, silently corrupting their output and
+        # pinning MTP draft acceptance at 0%. Route those layers to TRITON_ATTN and
+        # leave the 4 hd512 global layers on FA4, where #164 is correct.
+        # Reproduces with hd256 + a sliding window and >1 K/V block in range,
+        # comparing the fp8 cache against the same kernel on a dequantized cache.
+        if (
+            selected_backend is None
+            and device_capability.major == 9
+            and attn_selector_config.kv_cache_dtype in ("fp8", "fp8_e4m3")
+            and attn_selector_config.head_size != 512
+        ):
+            selected_backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "Routing head_size=%d fp8-KV layers to TRITON_ATTN on SM90 "
+                "(FA4 fp8 kernel is hd512-only).",
+                attn_selector_config.head_size,
+            )
+
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             try:
