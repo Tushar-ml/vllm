@@ -59,6 +59,10 @@ class FilterbankFeatures(nn.Module):
         mel_norm=None,
         stft_exact_pad=False,
         stft_conv=False,
+        # Match NeMo EncDecMultiTaskModel.transcribe defaults
+        # (aed_multitask_models._setup_transcribe_dataloader).
+        pad_min_duration=1.0,
+        pad_direction="both",
         device="cpu",
     ):
         super().__init__()
@@ -125,10 +129,13 @@ class FilterbankFeatures(nn.Module):
         self.pad_to = pad_to
         highfreq = highfreq or sample_rate / 2
         self.sample_rate = sample_rate
-        # disable pad min duration
-        # self.pad_min_duration = 1.0
-        self.pad_min_duration = 0.0
-        self.pad_direction = "both"
+        if pad_direction not in ("left", "right", "both"):
+            raise ValueError(
+                f"{self} received an invalid pad_direction: {pad_direction}. "
+                f"It must be one of 'left', 'right', or 'both'."
+            )
+        self.pad_min_duration = float(pad_min_duration)
+        self.pad_direction = pad_direction
 
         filterbanks = melscale_fbanks(
             n_freqs=self.n_fft // 2 + 1,
@@ -176,8 +183,10 @@ class FilterbankFeatures(nn.Module):
 
         assert self.window is not None
         assert self.fb is not None
-        self.window = self.window.to(dtype=torch.bfloat16)
-        self.fb = self.fb.to(dtype=torch.bfloat16)
+        # Keep float32 window/fb (NeMo parity). Casting to bf16 then back to
+        # float in stft/mel loses precision and regresses short-clip WER.
+        self.window = self.window.to(dtype=torch.float32)
+        self.fb = self.fb.to(dtype=torch.float32)
 
         self.generator = torch.Generator(device=device)
         self.generator.manual_seed(0)
@@ -310,23 +319,9 @@ class FilterbankFeatures(nn.Module):
 
     @torch.compile
     def forward(self, x, seq_len, linear_spec=False):
-        if x.shape[1] < self.sample_rate * self.pad_min_duration:
-            pad_amount = int(self.sample_rate * self.pad_min_duration) - x.shape[1]
-            if self.pad_direction == "right":
-                x = F.pad(x, (0, pad_amount), value=self.pad_value)
-            elif self.pad_direction == "left":
-                x = F.pad(x, (pad_amount, 0), value=self.pad_value)
-            elif self.pad_direction == "both":
-                left_pad = pad_amount // 2
-                right_pad = pad_amount - left_pad
-                x = F.pad(x, (left_pad, right_pad), value=self.pad_value)
-            else:
-                raise ValueError(
-                    f"{self} received an invalid pad_direction: {self.pad_direction}. "
-                    f"It must be one of 'left', 'right', or 'both'."
-                )
-            seq_len = torch.tensor([x.shape[1]], dtype=torch.float, device=x.device)
-
+        # Waveform min-duration padding is applied in
+        # CohereASRFeatureExtractor.__call__ (per-sample, NeMo AED parity)
+        # before this compiled mel path.
         seq_len_time = seq_len
         seq_len_unfixed = self.get_seq_len(seq_len)
 
@@ -452,6 +447,8 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
         mel_norm=None,
         stft_exact_pad=False,
         stft_conv=False,
+        pad_min_duration=1.0,
+        pad_direction="both",
         device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
         **kwargs,
     ):
@@ -463,6 +460,8 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
         )
         self.max_duration = max_duration
         self.hop_length = n_window_stride
+        self.pad_min_duration = float(pad_min_duration)
+        self.pad_direction = pad_direction
         self._device = torch.device(device)
         self._fb_config = dict(
             sample_rate=sampling_rate,
@@ -490,6 +489,8 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
             mel_norm=mel_norm,
             stft_exact_pad=stft_exact_pad,
             stft_conv=stft_conv,
+            pad_min_duration=self.pad_min_duration,
+            pad_direction=self.pad_direction,
             device=str(self._device),
         )
         self._filterbank: FilterbankFeatures | None = None
@@ -514,6 +515,31 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
             self._filterbank = self._filterbank.to(self._device)
         return self
 
+    def _pad_waveform_np(self, waveform: np.ndarray) -> np.ndarray:
+        """Pad one float waveform to pad_min_duration (NeMo AED transcribe)."""
+        min_samples = int(self.sampling_rate * self.pad_min_duration)
+        if min_samples <= 0 or waveform.shape[0] >= min_samples:
+            return waveform
+        pad_amount = min_samples - waveform.shape[0]
+        if self.pad_direction == "right":
+            left_pad, right_pad = 0, pad_amount
+        elif self.pad_direction == "left":
+            left_pad, right_pad = pad_amount, 0
+        elif self.pad_direction == "both":
+            left_pad = pad_amount // 2
+            right_pad = pad_amount - left_pad
+        else:
+            raise ValueError(
+                f"Invalid pad_direction: {self.pad_direction}. "
+                f"It must be one of 'left', 'right', or 'both'."
+            )
+        return np.pad(
+            waveform,
+            (left_pad, right_pad),
+            mode="constant",
+            constant_values=self.padding_value,
+        )
+
     def __call__(
         self,
         raw_speech,
@@ -523,6 +549,20 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
     ) -> BatchFeature:
         if isinstance(raw_speech, np.ndarray):
             raw_speech = [raw_speech]
+
+        # Per-sample pad before batching — matches NeMo TranscriptionTensorDataset
+        # (pad_min_duration=1.0, pad_direction=both for EncDecMultiTaskModel).
+        raw_before = [int(np.asarray(s).shape[0]) for s in raw_speech]
+        raw_speech = [self._pad_waveform_np(np.asarray(s)) for s in raw_speech]
+        raw_after = [int(s.shape[0]) for s in raw_speech]
+        if any(a != b for a, b in zip(raw_before, raw_after)):
+            logger.debug(
+                "CohereASR pad_min_duration=%.2f dir=%s samples %s -> %s",
+                self.pad_min_duration,
+                self.pad_direction,
+                raw_before,
+                raw_after,
+            )
 
         seq_len = torch.tensor([s.shape[0] for s in raw_speech])
 

@@ -20,7 +20,13 @@ from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
+from vllm.inputs import (
+    ExplicitEncoderDecoderPrompt,
+    MultiModalDataDict,
+    PromptType,
+    TextPrompt,
+    TokensPrompt,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
@@ -73,38 +79,54 @@ from .utils import AutoWeightsLoader, WeightsMapper, make_layers, maybe_prefix
 
 logger = init_logger(__name__)
 
-# From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
+# Extend the Whisper LANGUAGES registry that interfaces.py validates against.
+# The new Bodhan Indic codes (brx, doi, ks, kok, mai, mni, or, sat, bho, bhb)
+# are not in the upstream Whisper list — add them here before the class is
+# defined so that the __init_subclass__ validation in SupportsTranscription
+# accepts them without modifying the shared interfaces.py whitelist.
+from transformers.models.whisper.tokenization_whisper import LANGUAGES as _W_LANGS
+_BODHAN_EXTRA = {
+    "brx": "bodo",
+    "doi": "dogri",
+    "ks": "kashmiri",
+    "kok": "konkani",
+    "mai": "maithili",
+    "mni": "manipuri",
+    "or": "odia",
+    "sat": "santali",
+    "bho": "bhojpuri",
+    "bhb": "bhili",
+}
+for _k, _v in _BODHAN_EXTRA.items():
+    _W_LANGS.setdefault(_k, _v)
 
 ISO639_1_SUPPORTED_LANGS = {
-    "en": "English",
-    "fr": "French",
-    "de": "German",
-    "es": "Spanish",
-    "pt": "Portuguese",
-    "it": "Italian",
-    "nl": "Dutch",
-    "pl": "Polish",
-    "el": "Greek",
-    "ar": "Arabic",
-    "ko": "Korean",
-    "ja": "Japanese",
-    "vi": "Vietnamese",
-    "zh": "Chinese",
-    # Bodhan Indic / regional (must also exist in interfaces.LANGUAGES)
-    "hi": "Hindi",
+    # Bodhan Indic / regional languages (final production list)
+    "as": "Assamese",
     "bn": "Bengali",
+    "brx": "Bodo",
+    "doi": "Dogri",
+    "en": "English",
+    "gu": "Gujarati",
+    "hi": "Hindi",
+    "kn": "Kannada",
+    "ks": "Kashmiri",
+    "kok": "Konkani",
+    "mai": "Maithili",
+    "ml": "Malayalam",
+    "mni": "Manipuri",
+    "mr": "Marathi",
+    "ne": "Nepali",
+    "or": "Odia",
+    "pa": "Punjabi",
+    "sa": "Sanskrit",
+    "sat": "Santali",
+    "sd": "Sindhi",
     "ta": "Tamil",
     "te": "Telugu",
-    "kn": "Kannada",
-    "ml": "Malayalam",
-    "mr": "Marathi",
-    "gu": "Gujarati",
-    "pa": "Punjabi",
     "ur": "Urdu",
-    "as": "Assamese",
-    "ne": "Nepali",
-    "sa": "Sanskrit",
-    "sd": "Sindhi",
+    "bho": "Bhojpuri",
+    "bhb": "Bhili",
 }
 
 
@@ -1773,7 +1795,12 @@ class _EncoderCudaGraphCache:
 
     def __init__(self) -> None:
         self._graphs: dict[tuple, object] = {}
-        self._enabled = torch.cuda.is_available()
+        # Opt out when enforce-eager / BODHAN_ENCODER_CG=0 — short-clip WER
+        # regresses if a bucket graph is captured with the wrong length mask.
+        self._enabled = (
+            torch.cuda.is_available()
+            and os.environ.get("BODHAN_ENCODER_CG", "1") not in ("0", "false", "False")
+        )
 
     def run(
         self,
@@ -2138,8 +2165,25 @@ class CohereASRProcessingInfo(BaseProcessingInfo):
                 log=preproc.get("log", True),
                 log_zero_guard_type=preproc.get("log_zero_guard_type", "add"),
                 log_zero_guard_value=preproc.get("log_zero_guard_value", 2**-24),
-                dither=preproc.get("dither", 1e-05),
-                pad_to=preproc.get("pad_to", 16),
+                # Deterministic mel (pack preprocessor_config.json); NeMo train
+                # cfg keeps 1e-5 but inference export zeros dither.
+                dither=float(preproc.get("dither", 0.0) or 0.0)
+                if os.environ.get("BODHAN_MEL_DITHER") is None
+                else float(os.environ["BODHAN_MEL_DITHER"]),
+                pad_to=preproc.get("pad_to", 0),
+                # Match NeMo EncDecMultiTaskModel.transcribe pad defaults.
+                pad_min_duration=float(
+                    os.environ.get(
+                        "BODHAN_PAD_MIN_DURATION",
+                        preproc.get("pad_min_duration", 1.0),
+                    )
+                ),
+                pad_direction=str(
+                    os.environ.get(
+                        "BODHAN_PAD_DIRECTION",
+                        preproc.get("pad_direction", "both"),
+                    )
+                ),
                 frame_splicing=preproc.get("frame_splicing", 1),
                 exact_pad=preproc.get("exact_pad", False),
                 mag_power=preproc.get("mag_power", 2.0),
@@ -2170,7 +2214,16 @@ class CohereASRProcessingInfo(BaseProcessingInfo):
         return feature_extractor
 
     def get_num_audio_tokens(self, num_samples: int) -> int:
-        num_tokens = self.get_feature_extractor().get_seq_len(num_samples)
+        feature_extractor = self.get_feature_extractor()
+        # Mel FE pads waveforms to pad_min_duration before STFT (NeMo AED
+        # parity). Cross-attn placeholder count must use the padded length or
+        # short clips under-allocate encoder slots and drop trailing repeats.
+        min_samples = int(
+            feature_extractor.sampling_rate * feature_extractor.pad_min_duration
+        )
+        if min_samples > 0 and num_samples < min_samples:
+            num_samples = min_samples
+        num_tokens = feature_extractor.get_seq_len(num_samples)
         config = self.get_hf_config()
         subsampling_factor = config.encoder["subsampling_factor"]
         num_tokens = math.ceil(num_tokens / subsampling_factor)
@@ -2329,17 +2382,24 @@ class CohereAsrForConditionalGeneration(
         # (which is different from "_") and encode("▁ABC") ignores the first token
         # so the prompt_text is unreliable. However, prompt_token_ids can be used
         # to get prompt_text but it wont have the first token "▁".
-        prompt_text = None
         prompt_token_ids = cls._get_default_prompt_token_ids(
             tokenizer,
             model_config,
             language,
         )
 
-        return TokensPrompt(
-            prompt=prompt_text,
-            prompt_token_ids=prompt_token_ids,
-            multi_modal_data={"audio": (audio, stt_config.sample_rate)},
+        # Match Whisper: audio on the encoder, canary2 control tags on the
+        # decoder. A flat TokensPrompt is mis-parsed by parse_enc_dec_prompt
+        # as encoder-only (decoder_prompt=None), which drops leading repeats
+        # on short IndicVoices clips under the HTTP STT path.
+        return ExplicitEncoderDecoderPrompt(
+            encoder_prompt=TextPrompt(
+                prompt="",
+                multi_modal_data={"audio": (audio, stt_config.sample_rate)},
+            ),
+            decoder_prompt=TokensPrompt(
+                prompt_token_ids=prompt_token_ids,
+            ),
         )
 
     @classmethod
