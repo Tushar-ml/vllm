@@ -27,6 +27,9 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.speech_to_text.base.serving import (
     OpenAISpeechToText,
     asr_inter_chunk_separator,
+    asr_max_completion_tokens,
+    collapse_repeated_ngrams,
+    maybe_collapse_asr_text,
 )
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
 from vllm.entrypoints.speech_to_text.transcription.serving import (
@@ -66,6 +69,47 @@ def test_joined_chunks_english_has_space_between():
 def test_joined_chunks_chinese_has_no_space_between():
     sep = asr_inter_chunk_separator("zh", SupportsTranscription.no_space_languages)
     assert sep.join(["你好", "世界"]) == "你好世界"
+
+
+def test_collapse_repeated_ngrams_unigram_loop():
+    looped = " ".join(["ꯍꯦ"] * 40)
+    assert collapse_repeated_ngrams(looped) == "ꯍꯦ ꯍꯦ ꯍꯦ"
+
+
+def test_collapse_repeated_ngrams_keeps_short_refrain():
+    refrain = "छेत्री छेत्री पट्ट ले बदामी"
+    assert collapse_repeated_ngrams(refrain) == refrain
+
+
+def test_collapse_repeated_ngrams_trigram_loop():
+    gram = ["हां", "चलो", "चलो", "में"]
+    looped = "हां चलो गे " + " ".join(gram * 12)
+    out = collapse_repeated_ngrams(looped)
+    assert out.count("चलो") <= 8
+    assert len(out.split()) < 20
+
+
+def test_asr_max_completion_tokens_caps_long_audio_to_clip():
+    # 90s audio is chunked at 16s; each generate() must use the clip cap.
+    assert asr_max_completion_tokens(90.0, 16.0) == asr_max_completion_tokens(16.0, 16.0)
+    # NeMo: enc_len≈ceil(4.3*100/8)+2=56, max_gen=56+50-0=106 (no prompt).
+    assert asr_max_completion_tokens(4.3) == asr_max_completion_tokens(
+        4.3, prompt_len=0
+    )
+    assert asr_max_completion_tokens(4.3, prompt_len=10) == (
+        asr_max_completion_tokens(4.3, prompt_len=0) - 10
+    )
+    assert asr_max_completion_tokens(12.5, prompt_len=10) < 220
+
+
+def test_maybe_collapse_asr_text_only_on_runaway():
+    refrain = "छेत्री छेत्री पट्ट ले बदामी छेत्री छेत्री पट्ट ले बदामी"
+    # Normal speech rate: leave alone.
+    assert maybe_collapse_asr_text(refrain, duration_s=5.0) == refrain
+    looped = " ".join(["हा"] * 100)
+    collapsed = maybe_collapse_asr_text(looped, duration_s=2.0)
+    assert collapsed == "हा हा हा"
+    assert len(collapsed.split()) < len(looped.split())
 
 
 # --- Integration: serving (no model) -----------------------------------------

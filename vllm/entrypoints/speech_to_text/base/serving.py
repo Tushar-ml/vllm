@@ -87,6 +87,101 @@ def asr_inter_chunk_separator(
     return "" if language and language.lower() in no_space_languages else " "
 
 
+# Encoder-decoder ASR does not consume decoder context with the waveform, so
+# greedy decode otherwise runs until max_model_len and can loop on noise/music.
+# NeMo EncDecMultiTaskModel uses beam_size=1 with
+# max_generation_length = min(max_seq, enc_len + max_generation_delta) - prompt_len
+# (checkpoint decoding.beam.max_generation_delta=50). Match that here.
+_ASR_MAX_GENERATION_DELTA = 50
+_ASR_ENCODER_SUBSAMPLE = 8
+_ASR_MEL_FRAMES_PER_SEC = 100.0  # hop 0.01 s
+_ASR_PAD_MIN_DURATION_S = 1.0
+_ASR_MAX_NGRAM_RUN = 3
+_ASR_MAX_NGRAM_N = 4
+_ASR_RUNAWAY_WORDS_PER_SEC = 5.0
+
+
+def asr_encoder_len(duration_s: float, max_clip_s: float | None = None) -> int:
+    """Subsampled Conformer length for Bodhan Canary (×8 after 100 Hz mel)."""
+    chunk_s = max(float(duration_s), _ASR_PAD_MIN_DURATION_S)
+    if max_clip_s is not None:
+        chunk_s = min(chunk_s, float(max_clip_s))
+    # Match cohere_asr max_source_positions: ceil(clip * 100 / 8) + 2
+    return int(math.ceil(chunk_s * _ASR_MEL_FRAMES_PER_SEC / _ASR_ENCODER_SUBSAMPLE) + 2)
+
+
+def asr_max_completion_tokens(
+    duration_s: float,
+    max_clip_s: float | None = None,
+    *,
+    prompt_len: int = 0,
+    max_generation_delta: int = _ASR_MAX_GENERATION_DELTA,
+) -> int:
+    """NeMo-parity STT max new tokens: enc_len + delta − prompt_len."""
+    enc_len = asr_encoder_len(duration_s, max_clip_s)
+    # NeMo: max_seq = min(1024, src_len + delta); max_gen = max_seq - tgt_len
+    max_seq = enc_len + max_generation_delta
+    return max(1, max_seq - max(0, int(prompt_len)))
+
+
+def collapse_repeated_ngrams(
+    text: str,
+    max_run: int = _ASR_MAX_NGRAM_RUN,
+    max_n: int = _ASR_MAX_NGRAM_N,
+) -> str:
+    """Collapse consecutive repeated n-grams that exceed ``max_run``.
+
+    Stops decoder loops such as a single token repeated 100+ times or a
+    3-gram refrain that never emits EOS, without touching 2–3× song repeats.
+    """
+    tokens = text.split()
+    if len(tokens) < (max_run + 1):
+        return text
+    for n in range(1, max_n + 1):
+        tokens = _collapse_ngram_run(tokens, n, max_run)
+    return " ".join(tokens)
+
+
+def maybe_collapse_asr_text(
+    text: str,
+    duration_s: float,
+    *,
+    runaway_words_per_sec: float = _ASR_RUNAWAY_WORDS_PER_SEC,
+) -> str:
+    """Apply n-gram collapse only when word rate looks like a decoder loop."""
+    words = text.split()
+    if duration_s <= 0 or not words:
+        return text
+    if len(words) / float(duration_s) <= runaway_words_per_sec:
+        return text
+    return collapse_repeated_ngrams(text)
+
+
+def _collapse_ngram_run(tokens: list[str], n: int, max_run: int) -> list[str]:
+    if n <= 0 or max_run < 1 or len(tokens) < n * (max_run + 1):
+        return tokens
+    out: list[str] = []
+    i = 0
+    ntok = len(tokens)
+    while i < ntok:
+        gram = tokens[i : i + n]
+        if len(gram) < n:
+            out.extend(tokens[i:])
+            break
+        run = 1
+        j = i + n
+        while j + n <= ntok and tokens[j : j + n] == gram:
+            run += 1
+            j += n
+        if run > 1:
+            out.extend(gram * min(run, max_run))
+            i = j
+        else:
+            out.append(tokens[i])
+            i += 1
+    return out
+
+
 class OpenAISpeechToText(OpenAIServing):
     """Base class for speech-to-text operations like transcription and
     translation."""
@@ -480,11 +575,9 @@ class OpenAISpeechToText(OpenAIServing):
         max_model_len = self.model_config.max_model_len
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
 
-        input_len = (
-            OpenAISpeechToText._get_decoder_prompt_len(engine_inputs)
-            if request.use_beam_search
-            else 0
-        )
+        # Always subtract decoder prompt length (NeMo max_gen = max_seq - tgt_len).
+        prompt_len = OpenAISpeechToText._get_decoder_prompt_len(engine_inputs)
+        input_len = prompt_len if request.use_beam_search else prompt_len
 
         # Unlike most decoder-only models, whisper generation length is not
         # constrained by the size of the input audio, which is mapped to a
@@ -496,6 +589,22 @@ class OpenAISpeechToText(OpenAIServing):
             input_len,
             self.default_sampling_params,
         )
+        # NeMo EncDecMultiTask: max_gen = min(max_seq, enc_len + 50) - prompt.
+        clip_s = getattr(self.asr_config, "max_audio_clip_s", None)
+        duration_cap = asr_max_completion_tokens(
+            duration_s, clip_s, prompt_len=prompt_len
+        )
+        if max_tokens > duration_cap:
+            logger.debug(
+                "Capping STT max_tokens from %s to %s "
+                "(audio=%.2fs clip=%s prompt_len=%s)",
+                max_tokens,
+                duration_cap,
+                duration_s,
+                clip_s,
+                prompt_len,
+            )
+            max_tokens = duration_cap
 
         if request.use_beam_search:
             sampling_params = request.to_beam_search_params(
@@ -615,8 +724,18 @@ class OpenAISpeechToText(OpenAIServing):
                     chunk_text_parts[idx].extend([seg.text for seg in segments])
                 else:
                     raw_text = op.outputs[0].text
+                    # Per-chunk duration ≈ clip when multi-chunk; else full audio.
+                    chunk_dur = (
+                        float(chunk_size_in_s)
+                        if chunk_size_in_s is not None
+                        and len(list_result_generator) > 1
+                        else float(duration_s)
+                    )
                     chunk_text_parts[idx].append(
-                        self.model_cls.post_process_output(raw_text)
+                        maybe_collapse_asr_text(
+                            self.model_cls.post_process_output(raw_text),
+                            chunk_dur,
+                        )
                     )
             total_segments = [
                 segment
@@ -624,7 +743,9 @@ class OpenAISpeechToText(OpenAIServing):
                 for segment in segment_parts
             ]
             text_parts = [text for text_part in chunk_text_parts for text in text_part]
-            text = separator.join(text_parts)
+            text = maybe_collapse_asr_text(
+                separator.join(text_parts), float(duration_s)
+            )
             if self.task_type == "transcribe":
                 final_response: ResponseType
                 # add usage in TranscriptionResponse.

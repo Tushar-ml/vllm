@@ -1917,8 +1917,8 @@ class CohereASRModel(nn.Module):
 
     @staticmethod
     def _trt_encoder_requested() -> bool:
-        # Default on (matches serve_bodhan_vllm.sh). Set BODHAN_TRT_ENCODER=0 for torch.
-        return os.environ.get("BODHAN_TRT_ENCODER", "1") != "0"
+        # Default off (NeMo-parity torch path). Set BODHAN_TRT_ENCODER=1 to enable.
+        return os.environ.get("BODHAN_TRT_ENCODER", "0") == "1"
 
     def _maybe_init_trt_encoder(self) -> None:
         if self._trt_encoder is not None or self._trt_encoder_failed:
@@ -2039,7 +2039,8 @@ class CohereASRModel(nn.Module):
                         enc_states, encoded_len, out_dtype=out_dtype
                     )
 
-            # Torch path (also OOR fallback).
+            # Torch path (also OOR fallback). Mel may arrive fp32 (NeMo FE);
+            # cast once at Conformer entry to model / encoder dtype.
             try:
                 enc_dev = next(self.encoder.parameters()).device
                 if enc_dev.type != "cuda" and input_features.device.type == "cuda":
@@ -2050,8 +2051,14 @@ class CohereASRModel(nn.Module):
                 pass
 
             encoder_input_length = seq_lens
+            enc_dtype = next(self.encoder.parameters()).dtype
+            enc_in = (
+                input_features
+                if input_features.dtype == enc_dtype
+                else input_features.to(dtype=enc_dtype)
+            )
             out, encoder_output_length = self._encoder_cg.run(
-                self.encoder, input_features, encoder_input_length
+                self.encoder, enc_in, encoder_input_length
             )  # B x D x T
             out = out.permute(0, 2, 1)
 
@@ -2138,7 +2145,9 @@ class CohereASRProcessingInfo(BaseProcessingInfo):
             max_clip = float(
                 os.environ.get(
                     "BODHAN_MAX_AUDIO_CLIP_S",
-                    str(hf_config.max_audio_clip_s),
+                    # 16s is the TRT profile; torch encoder can take a full
+                    # Canary window. Default 32s so ~30s clips are not split.
+                    "32",
                 )
             )
             # Expose for CrossAttentionSpec / CUDA-graph capture sizing.
@@ -2148,6 +2157,29 @@ class CohereASRProcessingInfo(BaseProcessingInfo):
                 hf_config.max_source_positions = int(
                     math.ceil(max_clip * 100.0 / 8.0) + 2
                 )
+
+            # Prefer baked NeMo fb/window from the HF pack (export dumps).
+            mel_fb = None
+            mel_window = None
+            pack_dir = getattr(self.ctx.model_config, "model", None) or getattr(
+                self.ctx.model_config, "tokenizer", None
+            )
+            if pack_dir:
+                from pathlib import Path
+
+                pack_path = Path(str(pack_dir))
+                fb_path = pack_path / "mel_fb.pt"
+                if fb_path.is_file():
+                    mel_fb = torch.load(
+                        fb_path, map_location="cpu", weights_only=True
+                    )
+                    logger.info("Loaded NeMo mel filterbanks from %s", fb_path)
+                win_path = pack_path / "mel_window.pt"
+                if win_path.is_file():
+                    mel_window = torch.load(
+                        win_path, map_location="cpu", weights_only=True
+                    )
+                    logger.info("Loaded NeMo mel window from %s", win_path)
 
             feature_extractor = CohereASRFeatureExtractor(
                 feature_size=preproc.get("features", 64),
@@ -2191,6 +2223,8 @@ class CohereASRProcessingInfo(BaseProcessingInfo):
                 stft_exact_pad=preproc.get("stft_exact_pad", False),
                 stft_conv=preproc.get("stft_conv", False),
                 device="cpu",
+                mel_fb=mel_fb,
+                mel_window=mel_window,
             )
 
             tokenizer = self.ctx.tokenizer
@@ -2290,6 +2324,16 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
+        # NeMo FE is fp32; HF postprocess casts floats to model dtype. Restore
+        # mel to float32 so the encoder casts once at Conformer entry.
+        feats = processed_outputs.get("input_features")
+        if isinstance(feats, torch.Tensor) and feats.is_floating_point():
+            processed_outputs["input_features"] = feats.float()
+        elif isinstance(feats, list):
+            processed_outputs["input_features"] = [
+                f.float() if isinstance(f, torch.Tensor) and f.is_floating_point() else f
+                for f in feats
+            ]
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -2506,7 +2550,7 @@ class CohereAsrForConditionalGeneration(
         max_audio_clip_s = float(
             os.environ.get(
                 "BODHAN_MAX_AUDIO_CLIP_S",
-                str(model_config.hf_config.max_audio_clip_s),
+                "32",
             )
         )
         overlap_chunk_second = model_config.hf_config.overlap_chunk_second
@@ -2614,9 +2658,9 @@ class CohereAsrForConditionalGeneration(
         if isinstance(input_features, torch.Tensor):
             seq_lens = length.reshape(-1)
         else:
+            # Keep mel fp32 until get_encoder_outputs casts to encoder dtype.
             input_features = [
-                feat.to(self.dtype).squeeze(0).transpose(1, 0)
-                for feat in input_features
+                feat.float().squeeze(0).transpose(1, 0) for feat in input_features
             ]
             seq_lens = length.reshape(-1)
             input_features = torch.nn.utils.rnn.pad_sequence(

@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torchaudio.functional import melscale_fbanks
 from transformers import AutoFeatureExtractor, AutoProcessor, BatchFeature
 from transformers.feature_extraction_sequence_utils import (
     SequenceFeatureExtractor,
@@ -20,6 +19,35 @@ logger = logging.getLogger(__name__)
 
 CONSTANT = 1e-5
 INF_VAL = 10000.0
+
+
+def _build_librosa_mel_fbanks(
+    sample_rate: int,
+    n_fft: int,
+    nfilt: int,
+    lowfreq: float,
+    highfreq: float,
+    mel_norm: str | None,
+) -> torch.Tensor:
+    """NeMo FilterbankFeatures mel banks (librosa.filters.mel, slaney).
+
+    torchaudio.melscale_fbanks differs slightly and regresses short-clip WER
+    vs EncDecMultiTaskModel.transcribe. Shape: [1, nfilt, n_fft//2+1].
+    """
+    import librosa
+
+    filterbanks = torch.tensor(
+        librosa.filters.mel(
+            sr=sample_rate,
+            n_fft=n_fft,
+            n_mels=nfilt,
+            fmin=lowfreq,
+            fmax=highfreq,
+            norm=mel_norm if mel_norm is not None else "slaney",
+        ),
+        dtype=torch.float,
+    ).unsqueeze(0)
+    return filterbanks
 
 
 class FilterbankFeatures(nn.Module):
@@ -64,6 +92,10 @@ class FilterbankFeatures(nn.Module):
         pad_min_duration=1.0,
         pad_direction="both",
         device="cpu",
+        # Optional precomputed NeMo fb buffer: [1, nfilt, n_fft//2+1].
+        mel_fb: torch.Tensor | None = None,
+        # Optional NeMo hann window buffer: [win_length].
+        mel_window: torch.Tensor | None = None,
     ):
         super().__init__()
         if stft_conv or stft_exact_pad:
@@ -114,10 +146,20 @@ class FilterbankFeatures(nn.Module):
             "bartlett": torch.bartlett_window,
             "none": None,
         }
-        window_fn = torch_windows.get(window)
-        window_tensor = (
-            window_fn(self.win_length, periodic=False) if window_fn else None
-        )
+        if mel_window is not None:
+            window_tensor = mel_window.detach().to(dtype=torch.float).contiguous()
+            if window_tensor.ndim > 1:
+                window_tensor = window_tensor.view(-1)
+            if int(window_tensor.numel()) != int(self.win_length):
+                raise ValueError(
+                    f"mel_window length {int(window_tensor.numel())} does not "
+                    f"match win_length={self.win_length}"
+                )
+        else:
+            window_fn = torch_windows.get(window)
+            window_tensor = (
+                window_fn(self.win_length, periodic=False) if window_fn else None
+            )
         self.register_buffer("window", window_tensor)
 
         self.normalize = normalize
@@ -137,15 +179,26 @@ class FilterbankFeatures(nn.Module):
         self.pad_min_duration = float(pad_min_duration)
         self.pad_direction = pad_direction
 
-        filterbanks = melscale_fbanks(
-            n_freqs=self.n_fft // 2 + 1,
-            f_min=lowfreq,
-            f_max=highfreq,
-            n_mels=nfilt,
-            sample_rate=sample_rate,
-            norm=mel_norm if mel_norm is not None else "slaney",
-            mel_scale="slaney",
-        ).T.unsqueeze(0)
+        if mel_fb is not None:
+            filterbanks = mel_fb.detach().to(dtype=torch.float).contiguous()
+            if filterbanks.ndim == 2:
+                filterbanks = filterbanks.unsqueeze(0)
+            if filterbanks.shape[-2] != nfilt or filterbanks.shape[-1] != (
+                self.n_fft // 2 + 1
+            ):
+                raise ValueError(
+                    f"mel_fb shape {tuple(filterbanks.shape)} does not match "
+                    f"nfilt={nfilt}, n_fft//2+1={self.n_fft // 2 + 1}"
+                )
+        else:
+            filterbanks = _build_librosa_mel_fbanks(
+                sample_rate=sample_rate,
+                n_fft=self.n_fft,
+                nfilt=nfilt,
+                lowfreq=lowfreq,
+                highfreq=highfreq,
+                mel_norm=mel_norm,
+            )
         self.register_buffer("fb", filterbanks)
 
         # Calculate maximum sequence length
@@ -317,11 +370,12 @@ class FilterbankFeatures(nn.Module):
         else:
             return x, x_mean, x_std
 
-    @torch.compile
+    # Eager only: torch.compile on STFT/normalize drifts vs NeMo (~1e-2 abs).
+    @torch._dynamo.disable
     def forward(self, x, seq_len, linear_spec=False):
         # Waveform min-duration padding is applied in
         # CohereASRFeatureExtractor.__call__ (per-sample, NeMo AED parity)
-        # before this compiled mel path.
+        # before this mel path.
         seq_len_time = seq_len
         seq_len_unfixed = self.get_seq_len(seq_len)
 
@@ -450,6 +504,10 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
         pad_min_duration=1.0,
         pad_direction="both",
         device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
+        mel_fb: torch.Tensor | None = None,
+        mel_fb_path: str | None = None,
+        mel_window: torch.Tensor | None = None,
+        mel_window_path: str | None = None,
         **kwargs,
     ):
         super().__init__(
@@ -463,6 +521,12 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
         self.pad_min_duration = float(pad_min_duration)
         self.pad_direction = pad_direction
         self._device = torch.device(device)
+        if mel_fb is None and mel_fb_path:
+            mel_fb = torch.load(mel_fb_path, map_location="cpu", weights_only=True)
+        if mel_window is None and mel_window_path:
+            mel_window = torch.load(
+                mel_window_path, map_location="cpu", weights_only=True
+            )
         self._fb_config = dict(
             sample_rate=sampling_rate,
             n_window_size=n_window_size,
@@ -492,6 +556,8 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
             pad_min_duration=self.pad_min_duration,
             pad_direction=self.pad_direction,
             device=str(self._device),
+            mel_fb=mel_fb,
+            mel_window=mel_window,
         )
         self._filterbank: FilterbankFeatures | None = None
 
